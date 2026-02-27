@@ -1,0 +1,6 @@
+ cd HarpHand/frontend
+ npm run dev
+
+
+ cd "c:\Users\lenovo\Downloads\HarpHand (2)\HarpHand\backend"
+python -m uvicorn app:app --reload --host 127.0.0.1 --port 8000

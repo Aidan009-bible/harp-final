@@ -1,0 +1,10 @@
+# Dependencies
+**/node_modules/
+
+# Python cache
+**/__pycache__/
+*.pyc
+
+# Backend runtime data (generated at runtime)
+**/outputs/
+**/uploads/
