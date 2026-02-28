@@ -13,9 +13,12 @@ import cv2
 import numpy as np
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from google.oauth2 import id_token
+from google.auth.transport import requests
 
 from inference import run_pipeline
 
@@ -773,3 +776,68 @@ def get_defaults():
 @app.get("/")
 def root():
     return {"message": "Harp String Detection API", "docs": "/docs"}
+
+# --- Authentication ---
+
+class GoogleAuthRequest(BaseModel):
+    token: str
+
+@app.post("/api/auth/google")
+async def google_auth(auth_req: GoogleAuthRequest):
+    """
+    Verify the Google OAuth token sent from the frontend.
+    """
+    try:
+        # Securely pull from environment variables, or fallback to the provided values if testing locally
+        CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "YOUR_GOOGLE_CLIENT_ID_HERE")
+        CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "YOUR_GOOGLE_CLIENT_SECRET_HERE")
+
+        # Exchange auth code for access_token and id_token
+        import requests as http_requests
+        token_response = http_requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": auth_req.token,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+                "redirect_uri": "postmessage", # Required for @react-oauth/google useGoogleLogin flow='auth-code'
+                "grant_type": "authorization_code",
+            }
+        )
+
+        token_data = token_response.json()
+        
+        if "error" in token_data:
+            print(f"Error from Google token exchange: {token_data}")
+            raise ValueError(token_data.get("error_description", "Token exchange failed"))
+
+        id_token_str = token_data.get("id_token")
+        if not id_token_str:
+            raise ValueError("No id_token received from Google")
+
+        # Now verify the id_token
+        info = id_token.verify_oauth2_token(
+            id_token_str,
+            requests.Request(),
+            CLIENT_ID,
+            clock_skew_in_seconds=10
+        )
+        
+        user_id = info['sub']
+        email = info.get('email', '')
+        name = info.get('name', '')
+        
+        return {
+            "status": "success",
+            "message": "Authenticated successfully",
+            "user": {
+                "id": user_id,
+                "email": email,
+                "name": name
+            }
+        }
+    except ValueError as e:
+        # Invalid token
+        raise HTTPException(status_code=401, detail=f"Invalid Google token: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Auth error: {str(e)}")
