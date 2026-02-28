@@ -3,7 +3,7 @@ import jsPDF from 'jspdf'
 import html2canvas from 'html2canvas'
 import '../App.css'
 
-const API = '/api'
+const API = import.meta.env.VITE_API_URL || '/api'
 
 export default function App() {
   const [modelFile, setModelFile] = useState(null)
