@@ -24,7 +24,8 @@ export default function Login() {
                 setAuthError(null);
                 // Send the auth code to our FastAPI backend 
                 // The backend will exchange it for tokens and verify
-                const res = await fetch('/api/auth/google', {
+                const API = import.meta.env.VITE_API_URL || '/api';
+                const res = await fetch(`${API}/auth/google`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
