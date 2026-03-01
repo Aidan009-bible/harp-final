@@ -138,11 +138,16 @@ export default function App() {
           const logsData = await logsRes.json()
           setLogs(logsData.events || [])
         }
-        // Get video URL (prefer combined, fallback to audio/hand)
-        const videoType = (data.audio && data.hand && data.combined) ? 'combined' :
-          (data.audio ? 'audio' : (data.hand ? 'hand' : null))
-        if (videoType) {
-          setVideoUrl(`${API}/video-stream/${id}?type=${videoType}`)
+        // Get video URL (prefer combined, fallback to audio/hand, or use direct path for single mode)
+        let videoUrlToSet = null
+        if (data.audio && data.hand) {
+          const type = data.combined ? 'combined' : 'audio'
+          videoUrlToSet = `${API}/video-stream/${id}?type=${type}`
+        } else if (data.video_path) {
+          videoUrlToSet = `${API}/video-stream/${id}`
+        }
+        if (videoUrlToSet) {
+          setVideoUrl(videoUrlToSet)
         }
       } catch (err) {
         console.error('Error fetching logs/video:', err)
