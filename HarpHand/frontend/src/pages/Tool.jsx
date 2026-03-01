@@ -716,7 +716,10 @@ export default function App() {
             </div>
             <div className="log-download-row">
               <span className="log-summary">
-                {gridRows.length} events · {gridRows.filter((r) => r.match).length} matches · {gridRows.length > 0 ? ((gridRows.filter((r) => r.match).length / gridRows.length) * 100).toFixed(1) : '0'}% accuracy
+                {gridRows.length} events
+                {(status?.audio && status?.hand) && (
+                  <> · {gridRows.filter((r) => r.match).length} matches · {gridRows.length > 0 ? ((gridRows.filter((r) => r.match).length / gridRows.length) * 100).toFixed(1) : '0'}% accuracy</>
+                )}
               </span>
               <button type="button" className="btn primary" onClick={downloadLog} title="Download full detection log as CSV">
                 Download log (CSV)
