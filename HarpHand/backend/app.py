@@ -41,7 +41,11 @@ app = FastAPI(title="Harp String Detection API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173", 
+        "http://127.0.0.1:5173",
+        "https://harp-final.vercel.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -186,12 +190,37 @@ def create_pluck_filtered_video(
         writer.release()
 
 
+def _reencode_to_h264(video_path: str) -> str:
+    """Re-encode an mp4v (MPEG-4 Part 2) video to H.264 so browsers can play it."""
+    import subprocess
+    if not video_path or not os.path.isfile(video_path):
+        return video_path
+    h264_path = video_path.replace(".mp4", "_h264.mp4")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-c:v", "libx264", "-preset", "fast",
+             "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", h264_path],
+            check=True, capture_output=True, timeout=600,
+        )
+        # Replace original with h264 version
+        os.replace(h264_path, video_path)
+        print(f"Re-encoded {video_path} to H.264 successfully")
+    except Exception as e:
+        print(f"Warning: H.264 re-encode failed for {video_path}: {e}")
+        # Clean up temp file if it exists
+        if os.path.isfile(h264_path):
+            os.remove(h264_path)
+    return video_path
+
+
 def run_job_audio(job_id: str, model_path: str, video_path: str, use_yin_fallback: bool):
     try:
         jobs[job_id] = {"status": "running", "message": "Processing (audio)..."}
         csv_path, video_out_path, df = run_pipeline(
             model_path, video_path, str(OUTPUT_DIR / job_id), use_yin_fallback=use_yin_fallback
         )
+        # Re-encode to H.264 for browser playback
+        video_out_path = _reencode_to_h264(video_out_path)
         jobs[job_id] = {
             "status": "done",
             "csv_path": csv_path,
@@ -215,6 +244,8 @@ def run_job_hand(job_id: str, video_path: str, weights_path: str | None):
             preview=False,
             weights_path=weights_path,
         )
+        # Re-encode to H.264 for browser playback
+        video_out_path = _reencode_to_h264(video_out_path)
         rows = 0
         if os.path.isfile(csv_path):
             with open(csv_path, "r", encoding="utf-8") as f:
@@ -613,146 +644,152 @@ def get_logs(job_id: str):
     PLUCK_WINDOW = 0.15  # Only consider hand 0–150ms BEFORE onset (finger on string)
     TRACKING_WINDOW = 0.5  # Window to determine if hand event is "tracking" vs "detected"
     
+    # Determine paths based on job structure
+    audio_csv = job.get("audio", {}).get("csv_path") if "audio" in job and job["audio"] else None
+    hand_csv = job.get("hand", {}).get("csv_path") if "hand" in job and job["hand"] else None
+    if "csv_path" in job:
+        if "touch_events.csv" in job["csv_path"]:
+            hand_csv = job["csv_path"]
+        else:
+            audio_csv = job["csv_path"]
+            
     # Parse audio CSV and collect onsets
-    if "audio" in job and job["audio"]:
-        audio_csv = job["audio"].get("csv_path")
-        if audio_csv and os.path.isfile(audio_csv):
-            try:
-                with open(audio_csv, "r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        try:
-                            time_sec = float(row.get("time_sec", 0))
-                            audio_onsets.append(time_sec)
-                            strings = row.get("predicted_strings", "").strip()
-                            if strings:
-                                for s in strings.split(","):
-                                    s = s.strip()
-                                    if s and s.isdigit():
-                                        s_num = int(s)
-                                        prob_key = f"prob_S{s_num}"
-                                        prob = float(row.get(prob_key, 0)) if prob_key in row else 0.0
-                                        events.append({
-                                            "time": time_sec,
-                                            "type": "audio",
-                                            "string": f"S{s}",
-                                            "confidence": prob,
-                                            "method": row.get("used", "model"),
-                                        })
-                        except (ValueError, KeyError) as e:
-                            print(f"Skipping invalid audio CSV row: {e}")
-                            continue
-            except Exception as e:
-                print(f"Error parsing audio CSV: {e}")
+    if audio_csv and os.path.isfile(audio_csv):
+        try:
+            with open(audio_csv, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        time_sec = float(row.get("time_sec", 0))
+                        audio_onsets.append(time_sec)
+                        strings = row.get("predicted_strings", "").strip()
+                        if strings:
+                            for s in strings.split(","):
+                                s = s.strip()
+                                if s and s.isdigit():
+                                    s_num = int(s)
+                                    prob_key = f"prob_S{s_num}"
+                                    prob = float(row.get(prob_key, 0)) if prob_key in row else 0.0
+                                    events.append({
+                                        "time": time_sec,
+                                        "type": "audio",
+                                        "string": f"S{s}",
+                                        "confidence": prob,
+                                        "method": row.get("used", "model"),
+                                    })
+                    except (ValueError, KeyError) as e:
+                        print(f"Skipping invalid audio CSV row: {e}")
+                        continue
+        except Exception as e:
+            print(f"Error parsing audio CSV: {e}")
     
     # Parse hand CSV: only one hand+string entry per pluck (sound event)
     # Group hand events by nearest audio onset; emit at most one hand row per pluck
-    if "hand" in job and job["hand"]:
-        hand_csv = job["hand"].get("csv_path")
-        if hand_csv and os.path.isfile(hand_csv) and len(audio_onsets) > 0:
-            try:
-                # Collect all hand events with time
-                hand_rows = []
-                with open(hand_csv, "r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        time_str = row.get("time", "00:00.00")
-                        parts = time_str.split(":")
-                        if len(parts) != 2:
-                            continue
+    if hand_csv and os.path.isfile(hand_csv) and len(audio_onsets) > 0:
+        try:
+            # Collect all hand events with time
+            hand_rows = []
+            with open(hand_csv, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    time_str = row.get("time", "00:00.00")
+                    parts = time_str.split(":")
+                    if len(parts) != 2:
+                        continue
+                    try:
+                        minutes = int(parts[0])
+                        sec_part = float(parts[1])
+                        hand_time = minutes * 60 + sec_part
+                        dist_px = float(row.get("dist_px", 0)) if row.get("dist_px") else 0.0
+                        max_dist = 20.0
+                        confidence = max(0.0, min(1.0, 1.0 - (dist_px / max_dist))) if dist_px > 0 else 0.5
+                        hand_rows.append({
+                            "time": hand_time,
+                            "string": row.get("string", "?"),
+                            "finger": row.get("finger", ""),
+                            "distance": dist_px,
+                            "confidence": confidence,
+                        })
+                    except (ValueError, KeyError):
+                        continue
+            
+            # One hand event per sound: only hand events BEFORE onset (finger on string)
+            unique_onsets = sorted(set(audio_onsets))
+            for onset_time in unique_onsets:
+                n_strings = sum(1 for e in events if e.get("type") == "audio" and e.get("time") == onset_time)
+                if n_strings <= 0:
+                    continue
+                audio_strings_at_onset = {e["string"] for e in events if e.get("type") == "audio" and e.get("time") == onset_time}
+                # Hand must be in [onset - PLUCK_WINDOW, onset]; rank by how close to onset (before)
+                matches = [(onset_time - h["time"], h) for h in hand_rows if (onset_time - PLUCK_WINDOW <= h["time"] <= onset_time)]
+                best_by_key = {}
+                for dt, h in matches:
+                    s = str(h["string"]).strip()
+                    string_display = s if (s and s.upper().startswith("S")) else (f"S{s}" if s else "S?")
+                    key = (string_display, h["finger"])
+                    if key not in best_by_key or dt < best_by_key[key][0]:
+                        best_by_key[key] = (dt, h, string_display)
+                candidates = list(best_by_key.values())
+                # Prefer hand events whose string matches an audio string at this pluck
+                matching = [c for c in candidates if c[2] in audio_strings_at_onset]
+                if matching:
+                    candidates = matching
+                if not candidates:
+                    continue
+                # Pick exactly n_strings hand events: 1 sound -> best finger; 2 sounds -> best thumb + best index
+                if n_strings == 1:
+                    chosen = [max(candidates, key=lambda c: c[1]["confidence"])]
+                else:
+                    by_finger = {}
+                    for (dt, h, string_display) in candidates:
+                        by_finger.setdefault(h["finger"], []).append((dt, h, string_display))
+                    best_thumb = max(by_finger.get("thumb", []), key=lambda c: c[1]["confidence"], default=None)
+                    best_index = max(by_finger.get("index", []), key=lambda c: c[1]["confidence"], default=None)
+                    if best_thumb and best_index:
+                        chosen = [best_thumb, best_index]
+                    else:
+                        chosen = sorted(candidates, key=lambda c: -c[1]["confidence"])[:n_strings]
+                for (dt, h, string_display) in chosen:
+                    events.append({
+                        "time": onset_time,
+                        "type": "hand",
+                        "string": string_display,
+                        "finger": h["finger"],
+                        "distance": h["distance"],
+                        "frame": 0,
+                        "status": "detected",
+                        "confidence": h["confidence"],
+                    })
+        except Exception as e:
+            print(f"Error parsing hand CSV: {e}")
+            
+    elif hand_csv and os.path.isfile(hand_csv) and len(audio_onsets) == 0:
+        # Hand-only job: include all hand events (no pluck filter)
+        try:
+            with open(hand_csv, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    time_str = row.get("time", "00:00.00")
+                    parts = time_str.split(":")
+                    if len(parts) == 2:
                         try:
-                            minutes = int(parts[0])
-                            sec_part = float(parts[1])
-                            hand_time = minutes * 60 + sec_part
+                            hand_time = int(parts[0]) * 60 + float(parts[1])  # MM:SS.mm
                             dist_px = float(row.get("dist_px", 0)) if row.get("dist_px") else 0.0
-                            max_dist = 20.0
-                            confidence = max(0.0, min(1.0, 1.0 - (dist_px / max_dist))) if dist_px > 0 else 0.5
-                            hand_rows.append({
+                            confidence = max(0.0, min(1.0, 1.0 - (dist_px / 20.0))) if dist_px > 0 else 0.5
+                            events.append({
                                 "time": hand_time,
-                                "string": row.get("string", "?"),
+                                "type": "hand",
+                                "string": f"S{row.get('string', '?')}",
                                 "finger": row.get("finger", ""),
                                 "distance": dist_px,
+                                "frame": 0,
+                                "status": "detected",
                                 "confidence": confidence,
                             })
                         except (ValueError, KeyError):
                             continue
-                
-                # One hand event per sound: only hand events BEFORE onset (finger on string)
-                unique_onsets = sorted(set(audio_onsets))
-                for onset_time in unique_onsets:
-                    n_strings = sum(1 for e in events if e.get("type") == "audio" and e.get("time") == onset_time)
-                    if n_strings <= 0:
-                        continue
-                    audio_strings_at_onset = {e["string"] for e in events if e.get("type") == "audio" and e.get("time") == onset_time}
-                    # Hand must be in [onset - PLUCK_WINDOW, onset]; rank by how close to onset (before)
-                    matches = [(onset_time - h["time"], h) for h in hand_rows if (onset_time - PLUCK_WINDOW <= h["time"] <= onset_time)]
-                    best_by_key = {}
-                    for dt, h in matches:
-                        s = str(h["string"]).strip()
-                        string_display = s if (s and s.upper().startswith("S")) else (f"S{s}" if s else "S?")
-                        key = (string_display, h["finger"])
-                        if key not in best_by_key or dt < best_by_key[key][0]:
-                            best_by_key[key] = (dt, h, string_display)
-                    candidates = list(best_by_key.values())
-                    # Prefer hand events whose string matches an audio string at this pluck
-                    matching = [c for c in candidates if c[2] in audio_strings_at_onset]
-                    if matching:
-                        candidates = matching
-                    if not candidates:
-                        continue
-                    # Pick exactly n_strings hand events: 1 sound -> best finger; 2 sounds -> best thumb + best index
-                    if n_strings == 1:
-                        chosen = [max(candidates, key=lambda c: c[1]["confidence"])]
-                    else:
-                        by_finger = {}
-                        for (dt, h, string_display) in candidates:
-                            by_finger.setdefault(h["finger"], []).append((dt, h, string_display))
-                        best_thumb = max(by_finger.get("thumb", []), key=lambda c: c[1]["confidence"], default=None)
-                        best_index = max(by_finger.get("index", []), key=lambda c: c[1]["confidence"], default=None)
-                        if best_thumb and best_index:
-                            chosen = [best_thumb, best_index]
-                        else:
-                            chosen = sorted(candidates, key=lambda c: -c[1]["confidence"])[:n_strings]
-                    for (dt, h, string_display) in chosen:
-                        events.append({
-                            "time": onset_time,
-                            "type": "hand",
-                            "string": string_display,
-                            "finger": h["finger"],
-                            "distance": h["distance"],
-                            "frame": 0,
-                            "status": "detected",
-                            "confidence": h["confidence"],
-                        })
-            except Exception as e:
-                print(f"Error parsing hand CSV: {e}")
-        elif hand_csv and os.path.isfile(hand_csv) and len(audio_onsets) == 0:
-            # Hand-only job: include all hand events (no pluck filter)
-            try:
-                with open(hand_csv, "r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        time_str = row.get("time", "00:00.00")
-                        parts = time_str.split(":")
-                        if len(parts) == 2:
-                            try:
-                                hand_time = int(parts[0]) * 60 + float(parts[1])  # MM:SS.mm
-                                dist_px = float(row.get("dist_px", 0)) if row.get("dist_px") else 0.0
-                                confidence = max(0.0, min(1.0, 1.0 - (dist_px / 20.0))) if dist_px > 0 else 0.5
-                                events.append({
-                                    "time": hand_time,
-                                    "type": "hand",
-                                    "string": f"S{row.get('string', '?')}",
-                                    "finger": row.get("finger", ""),
-                                    "distance": dist_px,
-                                    "frame": 0,
-                                    "status": "detected",
-                                    "confidence": confidence,
-                                })
-                            except (ValueError, KeyError):
-                                continue
-            except Exception as e:
-                print(f"Error parsing hand CSV: {e}")
+        except Exception as e:
+            print(f"Error parsing hand CSV: {e}")
     
     # Sort by time
     events.sort(key=lambda x: x["time"])
