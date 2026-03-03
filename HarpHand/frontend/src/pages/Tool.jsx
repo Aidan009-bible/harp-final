@@ -236,11 +236,24 @@ export default function App() {
     if (!generatedNoteRef.current || !noteRows.length) return
     try {
       const node = generatedNoteRef.current
+      // Temporarily expand the container so html2canvas captures the full grid
+      const origMaxHeight = node.style.maxHeight
+      const origOverflow = node.style.overflow
+      node.style.maxHeight = 'none'
+      node.style.overflow = 'visible'
+
       const canvas = await html2canvas(node, {
         scale: window.devicePixelRatio || 2,
         useCORS: true,
         backgroundColor: '#f5f0e1',
+        scrollY: -window.scrollY,
+        windowHeight: node.scrollHeight + 200,
       })
+
+      // Restore original styles
+      node.style.maxHeight = origMaxHeight
+      node.style.overflow = origOverflow
+
       const imgData = canvas.toDataURL('image/png')
       const pdf = new jsPDF({
         orientation: 'landscape',
@@ -249,12 +262,60 @@ export default function App() {
       })
       const pageWidth = pdf.internal.pageSize.getWidth()
       const pageHeight = pdf.internal.pageSize.getHeight()
+
+      // Mode label
+      const modeLabel = method === 'both' ? 'Both (Audio + Hand)' : method === 'audio' ? 'Audio Detection' : 'Hand Detection'
+
+      // Accuracy info
+      const totalEvents = gridRows.length
+      const matchCount = gridRows.filter((r) => r.match).length
+      const accuracyPct = totalEvents > 0 ? ((matchCount / totalEvents) * 100).toFixed(1) : '0.0'
+      const isBoth = !!(status?.audio && status?.hand)
+
+      // Title
+      pdf.setFontSize(16)
+      pdf.text(modeLabel, pageWidth / 2, 30, { align: 'center' })
+
+      // Stats line
+      pdf.setFontSize(10)
+      let statsText = `${totalEvents} events`
+      if (isBoth) {
+        statsText += ` · ${matchCount} matches · ${accuracyPct}% accuracy`
+      }
+      pdf.text(statsText, pageWidth / 2, 48, { align: 'center' })
+
+      // Calculate image size to fit the page
       const imgWidth = pageWidth - 80
       const imgHeight = (canvas.height * imgWidth) / canvas.width
-      const offsetY = Math.max((pageHeight - imgHeight) / 2, 40)
-      pdf.text('Generated Note', pageWidth / 2, 32, { align: 'center' })
-      pdf.addImage(imgData, 'PNG', 40, offsetY, imgWidth, imgHeight, undefined, 'FAST')
-      pdf.save('generated-note.pdf')
+
+      // If image is too tall for one page, scale it down or split across pages
+      const availableHeight = pageHeight - 70
+      if (imgHeight <= availableHeight) {
+        const offsetY = 60
+        pdf.addImage(imgData, 'PNG', 40, offsetY, imgWidth, imgHeight, undefined, 'FAST')
+      } else {
+        // Scale to fit width, then paginate
+        const scaledWidth = imgWidth
+        const scaledHeight = imgHeight
+        let yOffset = 0
+        let pageNum = 0
+        while (yOffset < scaledHeight) {
+          if (pageNum > 0) pdf.addPage()
+          const sourceY = (yOffset / scaledHeight) * canvas.height
+          const sourceH = Math.min((availableHeight / scaledHeight) * canvas.height, canvas.height - sourceY)
+          const sliceCanvas = document.createElement('canvas')
+          sliceCanvas.width = canvas.width
+          sliceCanvas.height = sourceH
+          const ctx = sliceCanvas.getContext('2d')
+          ctx.drawImage(canvas, 0, sourceY, canvas.width, sourceH, 0, 0, canvas.width, sourceH)
+          const sliceData = sliceCanvas.toDataURL('image/png')
+          const sliceH = (sourceH * scaledWidth) / canvas.width
+          pdf.addImage(sliceData, 'PNG', 40, pageNum === 0 ? 60 : 30, scaledWidth, sliceH, undefined, 'FAST')
+          yOffset += availableHeight
+          pageNum++
+        }
+      }
+      pdf.save(`${method}-detection-note.pdf`)
     } catch (err) {
       console.error('Failed to generate PDF', err)
     }
@@ -829,7 +890,19 @@ export default function App() {
         {status?.status === 'done' && logs.length > 0 && (
           <section className="card generated-note-card">
             <div className="generated-note-header-row">
-              <h3>Generated Note</h3>
+              <div>
+                <h3 style={{ margin: 0 }}>
+                  {method === 'both' ? 'Both (Audio + Hand)' : method === 'audio' ? 'Audio Detection' : 'Hand Detection'}
+                  {' '}
+                  — Note
+                </h3>
+                <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
+                  {gridRows.length} events
+                  {(status?.audio && status?.hand) && (
+                    <> · {gridRows.filter((r) => r.match).length} matches · {gridRows.length > 0 ? ((gridRows.filter((r) => r.match).length / gridRows.length) * 100).toFixed(1) : '0'}% accuracy</>
+                  )}
+                </span>
+              </div>
               {noteRows.length > 0 && (
                 <button type="button" className="btn secondary btn-sm" onClick={handleDownloadNotePdf}>
                   Download as PDF
