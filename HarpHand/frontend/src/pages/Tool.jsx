@@ -357,11 +357,29 @@ export default function App() {
     noteRows.push(noteCells.slice(i, i + NOTE_COLS))
   }
 
+  // User profile from localStorage
+  const userName = localStorage.getItem('user_name') || ''
+  const userAvatar = localStorage.getItem('user_avatar') || ''
+  const userEmail = localStorage.getItem('user_email') || ''
+  const userInitials = userName
+    ? userName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+    : (userEmail ? userEmail[0].toUpperCase() : 'U')
+
   return (
     <div className="app">
-      <header className="header">
+      <header className="header" style={{ position: 'relative' }}>
         <h1>Harp String Detection</h1>
         <p className="tagline">Audio, hand, or both on the same video</p>
+        {userName && (
+          <div className="user-profile-badge" title={userName + (userEmail ? `\n${userEmail}` : '')}>
+            {userAvatar ? (
+              <img src={userAvatar} alt={userName} className="user-profile-avatar" referrerPolicy="no-referrer" />
+            ) : (
+              <span className="user-profile-initials">{userInitials}</span>
+            )}
+            <span className="user-profile-name">{userName.split(' ')[0]}</span>
+          </div>
+        )}
       </header>
 
       <main className="main">

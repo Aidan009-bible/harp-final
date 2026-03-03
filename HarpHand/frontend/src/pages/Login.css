@@ -25,6 +25,16 @@
   height: 100%;
   object-fit: cover;
   z-index: 0;
+  opacity: 0;
+  transition: opacity 1.2s ease-in-out;
+}
+
+.login-background-image.slide-active {
+  opacity: 1;
+}
+
+.login-background-image.slide-hidden {
+  opacity: 0;
 }
 
 .login-image-overlay {
@@ -73,11 +83,15 @@
   height: 3px;
   background-color: rgba(255, 255, 255, 0.3);
   border-radius: 2px;
-  transition: background-color 0.3s ease;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: background-color 0.3s ease, width 0.3s ease;
 }
 
 .indicator.active {
   background-color: #fff;
+  width: 36px;
 }
 
 /* Right Split: Form Side */
@@ -164,7 +178,8 @@
 }
 
 .password-wrapper .login-input {
-  padding-right: 3rem; /* Space for the eye icon */
+  padding-right: 3rem;
+  /* Space for the eye icon */
 }
 
 .password-toggle {
@@ -295,8 +310,12 @@
 }
 
 .social-icon {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
+}
+
+.google-btn {
+  width: 100%;
 }
 
 /* Responsive */
@@ -304,12 +323,12 @@
   .login-container {
     flex-direction: column;
   }
-  
+
   .login-image-side {
     min-height: 40vh;
     flex: none;
   }
-  
+
   .login-form-side {
     padding: 3rem 1.5rem;
   }
