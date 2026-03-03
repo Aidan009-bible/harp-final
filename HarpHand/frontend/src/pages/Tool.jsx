@@ -281,6 +281,13 @@ export default function App() {
       let statsText = `${totalEvents} events`
       if (isBoth) {
         statsText += ` · ${matchCount} matches · ${accuracyPct}% accuracy`
+      } else {
+        // Single mode: show average confidence
+        const confidences = logs.filter(e => typeof e.confidence === 'number').map(e => e.confidence)
+        if (confidences.length > 0) {
+          const avgConf = ((confidences.reduce((a, b) => a + b, 0) / confidences.length) * 100).toFixed(1)
+          statsText += ` · ${avgConf}% avg confidence`
+        }
       }
       pdf.text(statsText, pageWidth / 2, 48, { align: 'center' })
 
@@ -796,9 +803,13 @@ export default function App() {
             <div className="log-download-row">
               <span className="log-summary">
                 {gridRows.length} events
-                {(status?.audio && status?.hand) && (
+                {(status?.audio && status?.hand) ? (
                   <> · {gridRows.filter((r) => r.match).length} matches · {gridRows.length > 0 ? ((gridRows.filter((r) => r.match).length / gridRows.length) * 100).toFixed(1) : '0'}% accuracy</>
-                )}
+                ) : (() => {
+                  const confs = logs.filter(e => typeof e.confidence === 'number').map(e => e.confidence)
+                  const avg = confs.length > 0 ? ((confs.reduce((a, b) => a + b, 0) / confs.length) * 100).toFixed(1) : null
+                  return avg ? <> · {avg}% avg confidence</> : null
+                })()}
               </span>
               <button type="button" className="btn primary" onClick={downloadLog} title="Download full detection log as CSV">
                 Download log (CSV)
@@ -898,9 +909,13 @@ export default function App() {
                 </h3>
                 <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
                   {gridRows.length} events
-                  {(status?.audio && status?.hand) && (
+                  {(status?.audio && status?.hand) ? (
                     <> · {gridRows.filter((r) => r.match).length} matches · {gridRows.length > 0 ? ((gridRows.filter((r) => r.match).length / gridRows.length) * 100).toFixed(1) : '0'}% accuracy</>
-                  )}
+                  ) : (() => {
+                    const confs = logs.filter(e => typeof e.confidence === 'number').map(e => e.confidence)
+                    const avg = confs.length > 0 ? ((confs.reduce((a, b) => a + b, 0) / confs.length) * 100).toFixed(1) : null
+                    return avg ? <> · {avg}% avg confidence</> : null
+                  })()}
                 </span>
               </div>
               {noteRows.length > 0 && (
