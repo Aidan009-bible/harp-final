@@ -449,7 +449,7 @@ export default function App() {
             ) : (
               <span className="user-profile-initials">{userInitials}</span>
             )}
-            <span className="user-profile-name">{userName.split(' ')[0]}</span>
+            <span className="user-profile-name">{userName}</span>
           </div>
         )}
       </header>
