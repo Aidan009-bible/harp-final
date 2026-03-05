@@ -843,7 +843,7 @@
   font-size: 0.85rem;
   font-weight: 500;
   color: var(--text);
-  max-width: 120px;
+  max-width: 250px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
