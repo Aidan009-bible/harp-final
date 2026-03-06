@@ -863,14 +863,19 @@ async def google_auth(auth_req: GoogleAuthRequest):
         user_id = info['sub']
         email = info.get('email', '')
         name = info.get('name', '')
+        picture = info.get('picture', '')
         
         return {
             "status": "success",
             "message": "Authenticated successfully",
+            "name": name,
+            "email": email,
+            "picture": picture,
             "user": {
                 "id": user_id,
                 "email": email,
-                "name": name
+                "name": name,
+                "picture": picture
             }
         }
     except ValueError as e:
