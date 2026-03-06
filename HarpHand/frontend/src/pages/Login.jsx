@@ -58,9 +58,13 @@ export default function Login() {
 
                 const data = await res.json();
                 // Save Google profile info to localStorage
-                if (data.name) localStorage.setItem('user_name', data.name);
-                if (data.picture) localStorage.setItem('user_avatar', data.picture);
-                if (data.email) localStorage.setItem('user_email', data.email);
+                // Support both flat (data.name) and nested (data.user.name) response formats
+                const gName = data.name || data.user?.name || '';
+                const gPicture = data.picture || data.user?.picture || '';
+                const gEmail = data.email || data.user?.email || '';
+                if (gName) localStorage.setItem('user_name', gName);
+                if (gPicture) localStorage.setItem('user_avatar', gPicture);
+                if (gEmail) localStorage.setItem('user_email', gEmail);
 
                 navigate('/tool');
             } catch (err) {
