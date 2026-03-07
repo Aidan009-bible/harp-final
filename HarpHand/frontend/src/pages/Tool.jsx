@@ -6,6 +6,14 @@ import '../App.css'
 
 const API = import.meta.env.VITE_API_URL || '/api'
 
+// Myanmar harp string number → Western note name mapping
+const STRING_TO_NOTE = {
+  '1': 'G5', '2': 'E5', '3': 'D5', '4': 'C5',
+  '5': 'A4', '6': 'G4', '7': 'E4', '8': 'D4',
+  '9': 'C4', '10': 'A3', '11': 'G3', '12': 'E3',
+  '13': 'D3', '14': 'C3', '15': 'A2', '16': 'G2',
+}
+
 export default function App() {
   const [modelFile, setModelFile] = useState(null)
   const [videoFile, setVideoFile] = useState(null)
@@ -20,6 +28,7 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState(null)
   const [currentTime, setCurrentTime] = useState(0)
   const [logViewMode, setLogViewMode] = useState('list')  // 'list' | 'grid'
+  const [noteFormat, setNoteFormat] = useState('number')  // 'number' | 'note'
   const [videoDuration, setVideoDuration] = useState(0)
   const [useDefaultModel, setUseDefaultModel] = useState(false)
   const [useDefaultWeights, setUseDefaultWeights] = useState(true)
@@ -922,13 +931,37 @@ export default function App() {
                   })()}
                 </span>
               </div>
-              {noteRows.length > 0 && (
-                <button type="button" className="btn secondary btn-sm" onClick={handleDownloadNotePdf}>
-                  Download as PDF
-                </button>
-              )}
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <div className="log-view-toggle">
+                  <button
+                    type="button"
+                    className={`btn ghost ${noteFormat === 'number' ? 'active' : ''}`}
+                    onClick={() => setNoteFormat('number')}
+                    title="Show string numbers (1–16)"
+                  >
+                    S#
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn ghost ${noteFormat === 'note' ? 'active' : ''}`}
+                    onClick={() => setNoteFormat('note')}
+                    title="Show Western note names (G5–G2)"
+                  >
+                    Note
+                  </button>
+                </div>
+                {noteRows.length > 0 && (
+                  <button type="button" className="btn secondary btn-sm" onClick={handleDownloadNotePdf}>
+                    Download as PDF
+                  </button>
+                )}
+              </div>
             </div>
-            <p className="generated-note-desc">Each box is one sound event. Single string = number only; strings plucked together = numbers with underline.</p>
+            <p className="generated-note-desc">
+              {noteFormat === 'note'
+                ? 'Each box is one sound event shown as Western note name. Strings plucked together = notes with underline.'
+                : 'Each box is one sound event. Single string = number only; strings plucked together = numbers with underline.'}
+            </p>
             {noteRows.length > 0 ? (
               <div className="generated-note-grid-wrap" ref={generatedNoteRef}>
                 <div className="generated-note-grid" style={{ gridTemplateColumns: `repeat(${NOTE_COLS}, 1fr)` }}>
@@ -966,7 +999,7 @@ export default function App() {
                                   >
                                     ·
                                   </span>
-                                  <span>{p.num}</span>
+                                  <span>{noteFormat === 'note' ? (STRING_TO_NOTE[p.num] || p.num) : p.num}</span>
                                 </span>
                               ))}
                             </span>
