@@ -1,18 +1,41 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import jsPDF from 'jspdf'
-import html2canvas from 'html2canvas'
 import '../App.css'
+import harpImage from '../assets/myanmar_harp.jpg'
+import {
+  NOTE_COLUMNS,
+  STRING_TO_NOTE,
+  buildAgreementMatrix,
+  buildGridRows,
+  buildNoteRows,
+  buildPerStringStats,
+  calculateDetectionSummary,
+  formatTime,
+  validateVideoFile,
+} from '../lib/detection.js'
 
 const API = import.meta.env.VITE_API_URL || '/api'
 
-// Myanmar harp string number → Western note name mapping
-const STRING_TO_NOTE = {
-  '1': 'G5', '2': 'E5', '3': 'D5', '4': 'C5',
-  '5': 'A4', '6': 'G4', '7': 'E4', '8': 'D4',
-  '9': 'C4', '10': 'A3', '11': 'G3', '12': 'E3',
-  '13': 'D3', '14': 'C3', '15': 'A2', '16': 'G2',
-}
+const DETECTION_METHODS = [
+  {
+    value: 'audio',
+    label: 'Audio',
+    eyebrow: 'Fastest',
+    description: 'Detect plucks from the soundtrack using the trained 16-string model.',
+  },
+  {
+    value: 'hand',
+    label: 'Hand tracking',
+    eyebrow: 'Visual',
+    description: 'Track fingertips and their proximity to detected harp strings.',
+  },
+  {
+    value: 'both',
+    label: 'Audio + hand',
+    eyebrow: 'Recommended',
+    description: 'Compare both signals and review where their string labels agree.',
+  },
+]
 
 export default function App() {
   const [modelFile, setModelFile] = useState(null)
@@ -21,7 +44,7 @@ export default function App() {
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
   const [uploading, setUploading] = useState(false)
-  const [method, setMethod] = useState('audio')  // 'audio' | 'hand' | 'both'
+  const [method, setMethod] = useState('both')  // 'audio' | 'hand' | 'both'
   const [mode, setMode] = useState('hybrid')   // 'default' | 'hybrid' (audio only)
   const [weightsFile, setWeightsFile] = useState(null)
   const [logs, setLogs] = useState([])
@@ -32,16 +55,29 @@ export default function App() {
   const [videoDuration, setVideoDuration] = useState(0)
   const [useDefaultModel, setUseDefaultModel] = useState(false)
   const [useDefaultWeights, setUseDefaultWeights] = useState(true)
-  const [defaultsAvailable, setDefaultsAvailable] = useState({ default_model: false, default_weights: false })
+  const [defaultsAvailable, setDefaultsAvailable] = useState({
+    default_model: false,
+    default_weights: false,
+    allow_custom_model_uploads: false,
+    calibrated_thresholds: false,
+    ffmpeg_available: false,
+    hand_pre_onset_ms: 150,
+  })
+  const [apiState, setApiState] = useState('checking')
+  const [isDraggingVideo, setIsDraggingVideo] = useState(false)
   const videoRef = useRef(null)
   const generatedNoteRef = useRef(null)
   const logPanelRef = useRef(null)
   const modelInput = useRef(null)
   const videoInput = useRef(null)
   const weightsInput = useRef(null)
+  const pollTimerRef = useRef(null)
+  const activeJobRef = useRef(null)
 
   useEffect(() => {
-    fetch(`${API}/defaults`)
+    const controller = new AbortController()
+
+    fetch(`${API}/defaults`, { signal: controller.signal })
       .then((r) => {
         if (!r.ok) throw new Error('API not ok')
         return r.json()
@@ -50,128 +86,94 @@ export default function App() {
         setDefaultsAvailable(d)
         setUseDefaultModel(!!d.default_model)
         setUseDefaultWeights(!!d.default_weights)
+        setApiState('ready')
       })
-      .catch(() => {
-        setDefaultsAvailable({ default_model: false, default_weights: false })
+      .catch((fetchError) => {
+        if (fetchError.name === 'AbortError') return
+        setDefaultsAvailable({
+          default_model: false,
+          default_weights: false,
+          allow_custom_model_uploads: false,
+          calibrated_thresholds: false,
+          ffmpeg_available: false,
+          hand_pre_onset_ms: 150,
+        })
         setUseDefaultModel(false)
         setUseDefaultWeights(false)
+        setApiState('unavailable')
       })
+
+    return () => controller.abort()
   }, [])
 
-  // Logs visible only within this window (seconds) of current video time
-  const LOG_TIME_WINDOW = 0.25
-  const visibleLogs = logs.filter(
-    (e) => Math.abs((e.time || 0) - currentTime) <= LOG_TIME_WINDOW
+  useEffect(() => () => {
+    if (pollTimerRef.current) window.clearTimeout(pollTimerRef.current)
+    activeJobRef.current = null
+  }, [])
+
+  const visibleLogs = useMemo(
+    () => logs.filter((event) => Math.abs((event.time || 0) - currentTime) <= 0.25),
+    [logs, currentTime],
+  )
+  const gridRows = useMemo(() => buildGridRows(logs, currentTime), [logs, currentTime])
+  const perStringStats = useMemo(() => buildPerStringStats(gridRows), [gridRows])
+  const agreementMatrix = useMemo(() => buildAgreementMatrix(gridRows), [gridRows])
+  const isCombinedResult = Boolean(status?.audio && status?.hand)
+  const summary = useMemo(
+    () => calculateDetectionSummary(gridRows, logs, isCombinedResult),
+    [gridRows, logs, isCombinedResult],
   )
 
-  // Group by time for grid view: one row per pluck, with string + hand + match
-  const gridRows = (() => {
-    const byTime = {}
-    logs.forEach((e) => {
-      const t = e.time ?? 0
-      if (!byTime[t]) byTime[t] = { time: t, audio: [], hand: [] }
-      if (e.type === 'audio') byTime[t].audio.push(e)
-      else if (e.type === 'hand') byTime[t].hand.push(e)
-    })
-    return Object.values(byTime)
-      .sort((a, b) => a.time - b.time)
-      .map((row, idx) => {
-        const audioStrings = [...new Set(row.audio.map((e) => e.string))]
-        const handStrings = [...new Set(row.hand.map((e) => e.string))]
-        const match = audioStrings.some((s) => handStrings.includes(s))
-        const stringMain = audioStrings.length ? audioStrings.join(', ') : '-'
-        const handMain = handStrings.length ? handStrings.join(', ') : '-'
-        const note = row.audio[0]
-          ? row.audio.map((a) => `${(a.confidence * 100).toFixed(0)}%`).join(', ')
-          : row.hand[0]
-            ? `${row.hand[0].finger || ''} ${(row.hand[0].confidence * 100).toFixed(0)}%`.trim()
-            : ''
-        return {
-          index: idx + 1,
-          time: row.time,
-          stringMain,
-          handMain,
-          match,
-          note,
-          inWindow: Math.abs(row.time - currentTime) <= LOG_TIME_WINDOW,
-          audio: row.audio,
-          hand: row.hand,
-        }
-      })
-  })()
-
-  // Per-string stats (when we have both audio and hand): for each string, total plucks and matches
-  const perStringStats = (() => {
-    const stats = {}
-    for (let s = 1; s <= 16; s++) stats[`S${s}`] = { total: 0, matches: 0 }
-    gridRows.forEach((row) => {
-      const audioStrs = (row.stringMain || '').split(',').map((x) => x.trim()).filter(Boolean)
-      audioStrs.forEach((s) => {
-        if (stats[s] != null) {
-          stats[s].total += 1
-          if (row.match) stats[s].matches += 1
-        }
-      })
-    })
-    return stats
-  })()
-
-  // Agreement matrix: count of (audio, hand) pairs per pluck (when they match we count the pair)
-  const agreementMatrix = (() => {
-    const m = {}
-    for (let i = 1; i <= 16; i++) {
-      m[`S${i}`] = {}
-      for (let j = 1; j <= 16; j++) m[`S${i}`][`S${j}`] = 0
-    }
-    gridRows.forEach((row) => {
-      const audioStrs = (row.stringMain || '').split(',').map((x) => x.trim()).filter(Boolean)
-      const handStrs = (row.handMain || '').split(',').map((x) => x.trim()).filter(Boolean)
-      audioStrs.forEach((a) => {
-        handStrs.forEach((h) => {
-          if (m[a]?.[h] != null) m[a][h] += 1
-        })
-      })
-    })
-    return m
-  })()
-
   const pollStatus = useCallback(async (id) => {
-    const res = await fetch(`${API}/status/${id}`)
-    if (!res.ok) throw new Error('Status check failed')
-    const data = await res.json()
-    setStatus(data)
-    if (data.status === 'done') {
-      // Fetch logs and video URL
-      try {
+    if (activeJobRef.current !== id) return
+
+    try {
+      const res = await fetch(`${API}/status/${id}`)
+      if (!res.ok) throw new Error('Could not check the analysis status.')
+      const data = await res.json()
+      if (activeJobRef.current !== id) return
+
+      setStatus(data)
+      if (data.status === 'done') {
         const logsRes = await fetch(`${API}/logs/${id}`)
-        if (logsRes.ok) {
-          const logsData = await logsRes.json()
-          setLogs(logsData.events || [])
-        }
-        // Get video URL (prefer combined, fallback to audio/hand, or use direct path for single mode)
-        let videoUrlToSet = null
+        if (!logsRes.ok) throw new Error('Analysis finished, but the event log could not be loaded.')
+
+        const logsData = await logsRes.json()
+        setLogs(logsData.events || [])
+
         if (data.audio && data.hand) {
           const type = data.combined ? 'combined' : 'audio'
-          videoUrlToSet = `${API}/video-stream/${id}?type=${type}`
+          setVideoUrl(`${API}/video-stream/${id}?type=${type}`)
         } else if (data.video_path) {
-          videoUrlToSet = `${API}/video-stream/${id}`
+          setVideoUrl(`${API}/video-stream/${id}`)
         }
-        if (videoUrlToSet) {
-          setVideoUrl(videoUrlToSet)
-        }
-      } catch (err) {
-        console.error('Error fetching logs/video:', err)
+        activeJobRef.current = null
+        return
       }
-      return
+
+      if (data.status === 'error') {
+        setError(data.message || 'The analysis could not be completed.')
+        activeJobRef.current = null
+        return
+      }
+
+      pollTimerRef.current = window.setTimeout(() => pollStatus(id), 1500)
+    } catch (pollError) {
+      setError(pollError.message || 'Lost contact with the analysis service.')
+      setStatus({ status: 'error', message: pollError.message })
+      activeJobRef.current = null
     }
-    if (data.status === 'error') return
-    setTimeout(() => pollStatus(id), 1500)
   }, [])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    if (!videoFile) {
-      setError('Please select a video file.')
+    const videoError = validateVideoFile(videoFile)
+    if (videoError) {
+      setError(videoError)
+      return
+    }
+    if (apiState !== 'ready') {
+      setError('The analysis service is unavailable. Start the backend and try again.')
       return
     }
     if ((method === 'audio' || method === 'both') && !useDefaultModel && !modelFile) {
@@ -192,6 +194,10 @@ export default function App() {
     }
     setError(null)
     setStatus(null)
+    setLogs([])
+    setVideoUrl(null)
+    setCurrentTime(0)
+    setVideoDuration(0)
     setUploading(true)
     try {
       const form = new FormData()
@@ -218,6 +224,7 @@ export default function App() {
       }
       const { job_id } = await res.json()
       setJobId(job_id)
+      activeJobRef.current = job_id
       pollStatus(job_id)
     } catch (err) {
       setError(err.message || 'Upload failed')
@@ -227,6 +234,9 @@ export default function App() {
   }
 
   const reset = () => {
+    if (pollTimerRef.current) window.clearTimeout(pollTimerRef.current)
+    pollTimerRef.current = null
+    activeJobRef.current = null
     setModelFile(null)
     setVideoFile(null)
     setWeightsFile(null)
@@ -242,9 +252,20 @@ export default function App() {
     if (weightsInput.current) weightsInput.current.value = ''
   }
 
+  const handleVideoSelection = (file) => {
+    const validationError = validateVideoFile(file)
+    setVideoFile(validationError ? null : file)
+    setError(validationError)
+    if (validationError && videoInput.current) videoInput.current.value = ''
+  }
+
   const handleDownloadNotePdf = async () => {
     if (!generatedNoteRef.current || !noteRows.length) return
     try {
+      const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+        import('jspdf'),
+        import('html2canvas'),
+      ])
       const node = generatedNoteRef.current
       // Temporarily expand the container so html2canvas captures the full grid
       const origMaxHeight = node.style.maxHeight
@@ -276,28 +297,18 @@ export default function App() {
       // Mode label
       const modeLabel = method === 'both' ? 'Both (Audio + Hand)' : method === 'audio' ? 'Audio Detection' : 'Hand Detection'
 
-      // Accuracy info
-      const totalEvents = gridRows.length
-      const matchCount = gridRows.filter((r) => r.match).length
-      const accuracyPct = totalEvents > 0 ? ((matchCount / totalEvents) * 100).toFixed(1) : '0.0'
-      const isBoth = !!(status?.audio && status?.hand)
-
       // Title
       pdf.setFontSize(16)
       pdf.text(modeLabel, pageWidth / 2, 30, { align: 'center' })
 
       // Stats line
       pdf.setFontSize(10)
-      let statsText = `${totalEvents} events`
-      if (isBoth) {
-        statsText += ` · ${matchCount} matches · ${accuracyPct}% accuracy`
-      } else {
-        // Single mode: show average confidence
-        const confidences = logs.filter(e => typeof e.confidence === 'number').map(e => e.confidence)
-        if (confidences.length > 0) {
-          const avgConf = ((confidences.reduce((a, b) => a + b, 0) / confidences.length) * 100).toFixed(1)
-          statsText += ` · ${avgConf}% avg confidence`
-        }
+      let statsText = `${summary.totalEvents} events`
+      if (isCombinedResult && summary.agreement != null) {
+        statsText += ` · ${summary.matches}/${summary.comparableEvents} matching labels · ${summary.agreement.toFixed(1)}% agreement`
+      } else if (summary.averageScore != null) {
+        const scoreName = method === 'hand' ? 'avg proximity score' : 'avg model confidence'
+        statsText += ` · ${summary.averageScore.toFixed(1)}% ${scoreName}`
       }
       pdf.text(statsText, pageWidth / 2, 48, { align: 'center' })
 
@@ -338,12 +349,6 @@ export default function App() {
     }
   }
 
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = (seconds % 60).toFixed(2)
-    return `${String(mins).padStart(2, '0')}:${secs.padStart(5, '0')}`
-  }
-
   const downloadLog = () => {
     const headers = ['#', 'Time', 'Type', 'String', 'Finger', 'Confidence%', 'Method', 'Distance(px)', 'Status']
     const rows = logs.map((e, i) => {
@@ -380,6 +385,11 @@ export default function App() {
     window.open(url, '_blank')
   }
 
+  const downloadManifest = () => {
+    if (!jobId) return
+    window.open(`${API}/download/manifest/${jobId}`, '_blank')
+  }
+
   const seekToTime = (timeInSeconds) => {
     if (videoRef.current != null && !isNaN(timeInSeconds)) {
       videoRef.current.currentTime = timeInSeconds
@@ -397,43 +407,8 @@ export default function App() {
     if (prev) seekToTime(prev.time)
   }
 
-  const hasBothAudioHand = gridRows.some((r) => r.stringMain !== '-' && r.handMain !== '-')
-
-  // Generated Note: one cell per sound event; 8 columns, unlimited rows
-  const NOTE_COLS = 8
-  const noteCells = gridRows.map((row) => {
-    const baseStr = row.stringMain !== '-' ? row.stringMain : row.handMain
-    if (baseStr === '-') return { parts: [], together: false }
-
-    // Map which strings are plucked with thumb for this event
-    const thumbStrings = new Set(
-      (row.hand || [])
-        .filter((h) => String(h.finger || '').toLowerCase() === 'thumb')
-        .map((h) => String(h.string || '').trim())
-    )
-
-    const rawParts = (baseStr || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-
-    const parts =
-      rawParts
-        .map((s) => {
-          const num = s.replace(/^S\s*/i, '').replace(/\D/g, '')
-          if (!num) return null
-          const canonical = s.toUpperCase().startsWith('S') ? s : `S${num}`
-          const isThumb = thumbStrings.has(canonical)
-          return { num, thumb: isThumb }
-        })
-        .filter(Boolean) || []
-
-    return { parts, together: parts.length > 1 }
-  })
-  const noteRows = []
-  for (let i = 0; i < noteCells.length; i += NOTE_COLS) {
-    noteRows.push(noteCells.slice(i, i + NOTE_COLS))
-  }
+  const hasBothAudioHand = summary.comparableEvents > 0
+  const noteRows = useMemo(() => buildNoteRows(gridRows), [gridRows])
 
   // User profile from localStorage
   const userName = localStorage.getItem('user_name') || ''
@@ -442,203 +417,272 @@ export default function App() {
   const userInitials = userName
     ? userName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
     : (userEmail ? userEmail[0].toUpperCase() : 'U')
+  const needsAudioModel = method === 'audio' || method === 'both'
+  const needsHandWeights = method === 'hand' || method === 'both'
+  const audioResourceReady = !needsAudioModel
+    || (useDefaultModel && defaultsAvailable.default_model)
+    || (!useDefaultModel && defaultsAvailable.allow_custom_model_uploads && modelFile)
+  const handResourceReady = !needsHandWeights
+    || (useDefaultWeights && defaultsAvailable.default_weights)
+    || (!useDefaultWeights && defaultsAvailable.allow_custom_model_uploads && weightsFile)
+  const runtimeReady = !needsAudioModel || defaultsAvailable.ffmpeg_available
+  const canRun = apiState === 'ready' && Boolean(videoFile) && audioResourceReady && handResourceReady && runtimeReady && !uploading
 
   return (
-    <div className="app">
-      <header className="header header-vintage" style={{ position: 'relative' }}>
-        <div className="header-vintage-brand">
-          <Link to="/" className="header-vintage-logo">NAT SHIN NAUNG</Link>
-          <h1>Harp String Detection</h1>
-          <p className="tagline">Audio, hand, or both on the same video</p>
+    <div className="app app-showcase">
+      <header className="tool-topbar">
+        <Link to="/" className="tool-brand">
+          <span className="tool-brand-mark" aria-hidden="true">NSN</span>
+          <span>
+            <strong>Nat Shin Naung</strong>
+            <small>Saung analysis studio</small>
+          </span>
+        </Link>
+        <div className="tool-topbar-actions">
+          <Link to="/" className="tool-back-link">Project overview</Link>
+          {userName && (
+            <div className="user-profile-badge" title={userName + (userEmail ? `\n${userEmail}` : '')}>
+              {userAvatar ? (
+                <img src={userAvatar} alt={userName} className="user-profile-avatar" referrerPolicy="no-referrer" />
+              ) : (
+                <span className="user-profile-initials">{userInitials}</span>
+              )}
+              <span className="user-profile-name">{userName}</span>
+            </div>
+          )}
         </div>
-        {userName && (
-          <div className="user-profile-badge" title={userName + (userEmail ? `\n${userEmail}` : '')}>
-            {userAvatar ? (
-              <img src={userAvatar} alt={userName} className="user-profile-avatar" referrerPolicy="no-referrer" />
-            ) : (
-              <span className="user-profile-initials">{userInitials}</span>
-            )}
-            <span className="user-profile-name">{userName}</span>
-          </div>
-        )}
       </header>
 
-      <main className="main">
-        <section className="card upload-card">
-          <form onSubmit={handleSubmit} className="upload-form">
-            <div className="field">
-              <label>Detection type</label>
-              <div className="radio-group">
-                <label className="radio">
-                  <input
-                    type="radio"
-                    name="method"
-                    value="audio"
-                    checked={method === 'audio'}
-                    onChange={() => setMethod('audio')}
-                  />
-                  <span>Audio (model + onset detection)</span>
-                </label>
-                <label className="radio">
-                  <input
-                    type="radio"
-                    name="method"
-                    value="hand"
-                    checked={method === 'hand'}
-                    onChange={() => setMethod('hand')}
-                  />
-                  <span>Hand (YOLO strings + MediaPipe touch)</span>
-                </label>
-                <label className="radio">
-                  <input
-                    type="radio"
-                    name="method"
-                    value="both"
-                    checked={method === 'both'}
-                    onChange={() => setMethod('both')}
-                  />
-                  <span>Both (audio + hand on same video)</span>
-                </label>
+      <section className="tool-hero" aria-labelledby="tool-title">
+        <div>
+          <p className="tool-eyebrow">Myanmar harp · 16-string detection</p>
+          <h1 id="tool-title">Turn a performance into a reviewable string timeline.</h1>
+          <p className="tool-hero-copy">
+            Upload one clear video. HarpHand finds pluck moments, labels likely strings, and creates an annotated result you can inspect, teach from, or export.
+          </p>
+        </div>
+        <div className="tool-hero-facts" aria-label="Analysis capabilities">
+          <span><strong>16</strong> strings</span>
+          <span><strong>3</strong> analysis modes</span>
+          <span><strong>1</strong> synced timeline</span>
+        </div>
+      </section>
+
+      <main className="main tool-main">
+        <div className="tool-workspace">
+          <section className="card upload-card workflow-card">
+            <div className="workflow-card-heading">
+              <div>
+                <p className="section-kicker">New analysis</p>
+                <h2>Prepare your performance</h2>
               </div>
+              <span className={`service-pill service-pill-${apiState}`}>
+                {apiState === 'ready' ? 'Service ready' : apiState === 'checking' ? 'Connecting' : 'Service offline'}
+              </span>
             </div>
 
-            {(method === 'audio' || method === 'both') && (
-              <div className="field">
-                <label>Audio model</label>
-                {defaultsAvailable.default_model ? (
-                  <div className="radio-group">
-                    <label className="radio">
+            <form onSubmit={handleSubmit} className="upload-form showcase-form">
+              <fieldset className="workflow-step">
+                <legend>
+                  <span className="step-number">01</span>
+                  <span><strong>Choose the signal</strong><small>What should the analysis listen to or watch?</small></span>
+                </legend>
+                <div className="method-grid">
+                  {DETECTION_METHODS.map((option) => (
+                    <label key={option.value} className={`method-card ${method === option.value ? 'method-card-selected' : ''}`}>
                       <input
                         type="radio"
-                        name="modelSource"
-                        checked={useDefaultModel}
-                        onChange={() => { setUseDefaultModel(true); setModelFile(null) }}
+                        name="method"
+                        value={option.value}
+                        checked={method === option.value}
+                        onChange={() => setMethod(option.value)}
                       />
-                      <span>Use default model (app)</span>
+                      <span className="method-card-topline">
+                        <strong>{option.label}</strong>
+                        <small>{option.eyebrow}</small>
+                      </span>
+                      <span className="method-card-copy">{option.description}</span>
                     </label>
-                    <label className="radio">
-                      <input
-                        type="radio"
-                        name="modelSource"
-                        checked={!useDefaultModel}
-                        onChange={() => setUseDefaultModel(false)}
-                      />
-                      <span>Upload my model</span>
-                    </label>
-                  </div>
-                ) : (
-                  <p className="field-hint">Place default.keras in backend/models/ to use default, or upload your model below.</p>
-                )}
-                {(!useDefaultModel || !defaultsAvailable.default_model) && (
-                  <input
-                    id="model"
-                    ref={modelInput}
-                    type="file"
-                    accept=".keras"
-                    onChange={(e) => {
-                      setModelFile(e.target.files?.[0] ?? null)
-                      if (e.target.files?.[0]) setUseDefaultModel(false)
-                    }}
-                    className="mt-1"
-                  />
-                )}
-              </div>
-            )}
-
-            {(method === 'hand' || method === 'both') && (
-              <div className="field">
-                <label>String detection model</label>
-                {defaultsAvailable.default_weights ? (
-                  <div className="radio-group">
-                    <label className="radio">
-                      <input
-                        type="radio"
-                        name="weightsSource"
-                        checked={useDefaultWeights}
-                        onChange={() => { setUseDefaultWeights(true); setWeightsFile(null) }}
-                      />
-                      <span>Use default weights (app)</span>
-                    </label>
-                    <label className="radio">
-                      <input
-                        type="radio"
-                        name="weightsSource"
-                        checked={!useDefaultWeights}
-                        onChange={() => setUseDefaultWeights(false)}
-                      />
-                      <span>Upload my weights</span>
-                    </label>
-                  </div>
-                ) : (
-                  <p className="field-hint">Place best.pt in backend/weights/ to use default, or upload your weights below.</p>
-                )}
-                {(!useDefaultWeights || !defaultsAvailable.default_weights) && (
-                  <input
-                    id="weights"
-                    ref={weightsInput}
-                    type="file"
-                    accept=".pt"
-                    onChange={(e) => {
-                      setWeightsFile(e.target.files?.[0] ?? null)
-                      if (e.target.files?.[0]) setUseDefaultWeights(false)
-                    }}
-                    className="mt-1"
-                  />
-                )}
-              </div>
-            )}
-
-            <div className="field">
-              <label htmlFor="video">Video (.mp4, .mov, .mkv, .avi, .webm)</label>
-              <input
-                id="video"
-                ref={videoInput}
-                type="file"
-                accept=".mp4,.mov,.mkv,.avi,.webm"
-                onChange={(e) => setVideoFile(e.target.files?.[0] ?? null)}
-              />
-            </div>
-
-            {(method === 'audio' || method === 'both') && (
-              <div className="field">
-                <label>Audio mode</label>
-                <div className="radio-group">
-                  <label className="radio">
-                    <input
-                      type="radio"
-                      name="mode"
-                      value="default"
-                      checked={mode === 'default'}
-                      onChange={() => setMode('default')}
-                    />
-                    <span>Default (model only, threshold 0.25)</span>
-                  </label>
-                  <label className="radio">
-                    <input
-                      type="radio"
-                      name="mode"
-                      value="hybrid"
-                      checked={mode === 'hybrid'}
-                      onChange={() => setMode('hybrid')}
-                    />
-                    <span>Hybrid (model + YIN fallback)</span>
-                  </label>
+                  ))}
                 </div>
+              </fieldset>
+
+              <fieldset className="workflow-step">
+                <legend>
+                  <span className="step-number">02</span>
+                  <span><strong>Add a video</strong><small>Keep the harp visible and the audio free of heavy background noise.</small></span>
+                </legend>
+                <label
+                  className={`video-dropzone ${isDraggingVideo ? 'video-dropzone-active' : ''} ${videoFile ? 'video-dropzone-ready' : ''}`}
+                  onDragEnter={(event) => { event.preventDefault(); setIsDraggingVideo(true) }}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDragLeave={() => setIsDraggingVideo(false)}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    setIsDraggingVideo(false)
+                    handleVideoSelection(event.dataTransfer.files?.[0] ?? null)
+                  }}
+                >
+                  <input
+                    id="video"
+                    ref={videoInput}
+                    type="file"
+                    accept=".mp4,.mov,.mkv,.avi,.webm"
+                    onChange={(event) => handleVideoSelection(event.target.files?.[0] ?? null)}
+                  />
+                  <span className="dropzone-badge" aria-hidden="true">VIDEO</span>
+                  {videoFile ? (
+                    <span className="dropzone-copy">
+                      <strong>{videoFile.name}</strong>
+                      <small>{(videoFile.size / (1024 * 1024)).toFixed(1)} MB · ready to analyze</small>
+                    </span>
+                  ) : (
+                    <span className="dropzone-copy">
+                      <strong>Drop a performance here or browse</strong>
+                      <small>MP4, MOV, MKV, AVI, or WebM · up to 250 MB</small>
+                    </span>
+                  )}
+                </label>
+              </fieldset>
+
+              <details className="advanced-settings">
+                <summary>
+                  <span><strong>Analysis settings</strong><small>Bundled models are selected automatically.</small></span>
+                  <span className="summary-action">Adjust</span>
+                </summary>
+                <div className="advanced-settings-body">
+                  {(method === 'audio' || method === 'both') && (
+                    <div className="settings-block">
+                      <div>
+                        <strong>Audio detection</strong>
+                        <p>Hybrid mode uses pitch estimation when model confidence is low.</p>
+                      </div>
+                      <div className="segmented-control" aria-label="Audio detection mode">
+                        <label className={mode === 'hybrid' ? 'selected' : ''}>
+                          <input type="radio" name="mode" value="hybrid" checked={mode === 'hybrid'} onChange={() => setMode('hybrid')} />
+                          Hybrid
+                        </label>
+                        <label className={mode === 'default' ? 'selected' : ''}>
+                          <input type="radio" name="mode" value="default" checked={mode === 'default'} onChange={() => setMode('default')} />
+                          Model only
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="model-readiness-grid">
+                    {needsAudioModel && (
+                      <div className={`model-readiness ${defaultsAvailable.default_model ? 'ready' : 'missing'}`}>
+                        <span>Audio model</span>
+                        <strong>{defaultsAvailable.default_model ? 'Bundled and ready' : 'Not installed'}</strong>
+                      </div>
+                    )}
+                    {needsAudioModel && (
+                      <div className={`model-readiness ${defaultsAvailable.calibrated_thresholds ? 'ready' : ''}`}>
+                        <span>Threshold profile</span>
+                        <strong>
+                          {defaultsAvailable.calibrated_thresholds
+                            ? 'Validation calibrated'
+                            : 'Built-in baseline'}
+                        </strong>
+                      </div>
+                    )}
+                    {needsAudioModel && (
+                      <div className={`model-readiness ${defaultsAvailable.ffmpeg_available ? 'ready' : 'missing'}`}>
+                        <span>Audio runtime</span>
+                        <strong>{defaultsAvailable.ffmpeg_available ? 'FFmpeg ready' : 'FFmpeg missing'}</strong>
+                      </div>
+                    )}
+                    {needsHandWeights && (
+                      <div className={`model-readiness ${defaultsAvailable.default_weights ? 'ready' : 'missing'}`}>
+                        <span>Hand model</span>
+                        <strong>{defaultsAvailable.default_weights ? 'Bundled and ready' : 'Not installed'}</strong>
+                      </div>
+                    )}
+                  </div>
+
+                  {defaultsAvailable.allow_custom_model_uploads && (
+                    <div className="custom-model-settings">
+                      <p className="field-hint">Developer mode is enabled. Custom model files are loaded by the backend; only use files you trust.</p>
+                      {needsAudioModel && (
+                        <div className="field">
+                          <label>Audio model source</label>
+                          <div className="source-choice-row">
+                            <label><input type="radio" name="modelSource" checked={useDefaultModel} onChange={() => { setUseDefaultModel(true); setModelFile(null) }} /> Bundled</label>
+                            <label><input type="radio" name="modelSource" checked={!useDefaultModel} onChange={() => setUseDefaultModel(false)} /> Custom</label>
+                          </div>
+                          {!useDefaultModel && <input id="model" ref={modelInput} type="file" accept=".keras" onChange={(event) => setModelFile(event.target.files?.[0] ?? null)} />}
+                        </div>
+                      )}
+                      {needsHandWeights && (
+                        <div className="field">
+                          <label>Hand model source</label>
+                          <div className="source-choice-row">
+                            <label><input type="radio" name="weightsSource" checked={useDefaultWeights} onChange={() => { setUseDefaultWeights(true); setWeightsFile(null) }} /> Bundled</label>
+                            <label><input type="radio" name="weightsSource" checked={!useDefaultWeights} onChange={() => setUseDefaultWeights(false)} /> Custom</label>
+                          </div>
+                          {!useDefaultWeights && <input id="weights" ref={weightsInput} type="file" accept=".pt" onChange={(event) => setWeightsFile(event.target.files?.[0] ?? null)} />}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </details>
+
+              {apiState === 'unavailable' && (
+                <p className="service-message" role="status">
+                  The interface is ready, but the analysis service did not respond. Start the FastAPI backend to run a video.
+                </p>
+              )}
+              {error && <p className="error" role="alert">{error}</p>}
+              <button type="submit" className="btn primary run-analysis-button" disabled={!canRun}>
+                {uploading ? 'Uploading performance…' : videoFile ? 'Analyze this performance' : 'Choose a video to continue'}
+              </button>
+              <p className="privacy-note">Your video is processed for this analysis and is not used to retrain the model.</p>
+            </form>
+          </section>
+
+          <aside className="showcase-sidebar" aria-label="Recording guidance">
+            <div className="sidebar-visual">
+              <img src={harpImage} alt="Traditional Myanmar harp" />
+              <div className="sidebar-visual-copy">
+                <span>Saung</span>
+                <strong>16-string<br />analysis</strong>
               </div>
-            )}
-            {error && <p className="error">{error}</p>}
-            <button type="submit" className="btn primary" disabled={uploading}>
-              {uploading ? 'Uploading…' : 'Run detection'}
-            </button>
-          </form>
-        </section>
+            </div>
+            <div className="sidebar-panel">
+              <p className="section-kicker">For a cleaner result</p>
+              <ol className="capture-tips">
+                <li><span>01</span><p><strong>Frame the full string area.</strong> Keep hands and strings visible together.</p></li>
+                <li><span>02</span><p><strong>Use steady light.</strong> Reflections and motion blur weaken hand tracking.</p></li>
+                <li><span>03</span><p><strong>Record clean audio.</strong> Reduce speech and other instruments where possible.</p></li>
+              </ol>
+            </div>
+            <div className="sidebar-disclaimer">
+              <strong>About the result</strong>
+              <p>Agreement compares the audio and hand labels. It is useful diagnostic evidence, not a measured accuracy score.</p>
+            </div>
+          </aside>
+        </div>
 
         {status && (
           <section className="card status-card">
-            <h3>Status</h3>
-            {status.status === 'queued' && <p className="muted">Queued…</p>}
+            <h3>Analysis status</h3>
+            {status.status === 'queued' && <p className="running">{status.message || 'Waiting to start analysis…'}</p>}
             {status.status === 'running' && (
               <p className="running">{status.message || 'Processing…'}</p>
+            )}
+            {(status.status === 'queued' || status.status === 'running') && (
+              <div
+                className="status-progress"
+                role="progressbar"
+                aria-label="Analysis progress"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={status.progress ?? 0}
+              >
+                <span style={{ width: `${status.progress ?? 8}%` }} />
+              </div>
             )}
             {status.status === 'error' && (
               <p className="error">{status.message}</p>
@@ -653,7 +697,7 @@ export default function App() {
                     {status.combined ? (
                       <div className="actions" style={{ marginBottom: '0.5rem' }}>
                         <button type="button" className="btn primary" onClick={() => downloadVideo('combined')} style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}>
-                          📹 Combined Video (hand + audio)
+                          Combined annotated video
                         </button>
                       </div>
                     ) : status.combined_error && (
@@ -677,7 +721,7 @@ export default function App() {
                     </div>
                     <div className="actions" style={{ marginTop: '0.5rem' }}>
                       <button type="button" className="btn primary" onClick={downloadLog}>
-                        📥 Detection log (CSV)
+                        Detection log (CSV)
                       </button>
                     </div>
                   </>
@@ -701,7 +745,7 @@ export default function App() {
                     </div>
                     <div className="actions" style={{ marginTop: '0.5rem' }}>
                       <button type="button" className="btn primary" onClick={downloadLog}>
-                        📥 Detection log (CSV)
+                        Detection log (CSV)
                       </button>
                     </div>
                   </>
@@ -720,12 +764,17 @@ export default function App() {
                     </div>
                     <div className="actions" style={{ marginTop: '0.5rem' }}>
                       <button type="button" className="btn primary" onClick={downloadLog}>
-                        📥 Detection log (CSV)
+                        Detection log (CSV)
                       </button>
                     </div>
                   </>
                 )}
                 <div className="actions" style={{ marginTop: '0.5rem' }}>
+                  {method !== 'hand' && (
+                    <button type="button" className="btn secondary" onClick={downloadManifest}>
+                      Inference manifest
+                    </button>
+                  )}
                   <button type="button" className="btn ghost" onClick={reset}>
                     New run
                   </button>
@@ -816,13 +865,11 @@ export default function App() {
             <div className="log-download-row">
               <span className="log-summary">
                 {gridRows.length} events
-                {(status?.audio && status?.hand) ? (
-                  <> · {gridRows.filter((r) => r.match).length} matches · {gridRows.length > 0 ? ((gridRows.filter((r) => r.match).length / gridRows.length) * 100).toFixed(1) : '0'}% accuracy</>
-                ) : (() => {
-                  const confs = logs.filter(e => typeof e.confidence === 'number').map(e => e.confidence)
-                  const avg = confs.length > 0 ? ((confs.reduce((a, b) => a + b, 0) / confs.length) * 100).toFixed(1) : null
-                  return avg ? <> · {avg}% avg confidence</> : null
-                })()}
+                {isCombinedResult && summary.agreement != null ? (
+                  <> · {summary.matches}/{summary.comparableEvents} matching labels · {summary.agreement.toFixed(1)}% agreement · {summary.handCoverage.toFixed(1)}% hand coverage</>
+                ) : summary.averageScore != null ? (
+                  <> · {summary.averageScore.toFixed(1)}% {method === 'hand' ? 'avg proximity score' : 'avg model confidence'}</>
+                ) : null}
               </span>
               <button type="button" className="btn primary" onClick={downloadLog} title="Download full detection log as CSV">
                 Download log (CSV)
@@ -922,13 +969,11 @@ export default function App() {
                 </h3>
                 <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
                   {gridRows.length} events
-                  {(status?.audio && status?.hand) ? (
-                    <> · {gridRows.filter((r) => r.match).length} matches · {gridRows.length > 0 ? ((gridRows.filter((r) => r.match).length / gridRows.length) * 100).toFixed(1) : '0'}% accuracy</>
-                  ) : (() => {
-                    const confs = logs.filter(e => typeof e.confidence === 'number').map(e => e.confidence)
-                    const avg = confs.length > 0 ? ((confs.reduce((a, b) => a + b, 0) / confs.length) * 100).toFixed(1) : null
-                    return avg ? <> · {avg}% avg confidence</> : null
-                  })()}
+                  {isCombinedResult && summary.agreement != null ? (
+                    <> · {summary.matches}/{summary.comparableEvents} matching labels · {summary.agreement.toFixed(1)}% agreement</>
+                  ) : summary.averageScore != null ? (
+                    <> · {summary.averageScore.toFixed(1)}% {method === 'hand' ? 'avg proximity score' : 'avg model confidence'}</>
+                  ) : null}
                 </span>
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
@@ -964,10 +1009,10 @@ export default function App() {
             </p>
             {noteRows.length > 0 ? (
               <div className="generated-note-grid-wrap" ref={generatedNoteRef}>
-                <div className="generated-note-grid" style={{ gridTemplateColumns: `repeat(${NOTE_COLS}, 1fr)` }}>
+                <div className="generated-note-grid" style={{ gridTemplateColumns: `repeat(${NOTE_COLUMNS}, 1fr)` }}>
                   {noteRows.map((row, ri) =>
                     row.map((cell, ci) => {
-                      const flatIndex = ri * NOTE_COLS + ci
+                      const flatIndex = ri * NOTE_COLUMNS + ci
                       const eventTime = gridRows[flatIndex]?.time
                       const hasParts = cell.parts && cell.parts.length > 0
                       return (

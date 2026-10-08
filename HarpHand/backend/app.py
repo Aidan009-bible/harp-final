@@ -8,22 +8,26 @@ import uuid
 import shutil
 import subprocess
 import csv
-import json
 import cv2
 import numpy as np
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, File, UploadFile, Form, Query, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from google.oauth2 import id_token
 from google.auth.transport import requests
 
-from inference import run_pipeline
+from core.config import Settings
+from core.hand_geometry import normalized_touch_confidence
+from core.jobs import JobStore
+from core.uploads import UploadValidationError, save_upload
+from inference import FFMPEG_CMD, run_pipeline
 
 _backend_dir = Path(__file__).resolve().parent
 _project_root = _backend_dir.parent  # used only for FALLBACK_WEIGHTS (best.pt in parent folder)
+settings = Settings.from_env()
 try:
     from harp_hand_detector import run as run_hand_detector
 except ImportError as e:
@@ -41,11 +45,7 @@ app = FastAPI(title="Harp String Detection API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", 
-        "http://127.0.0.1:5173",
-        "https://harp-final.vercel.app"
-    ],
+    allow_origins=list(settings.cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -65,7 +65,11 @@ DEFAULT_MODEL = MODELS_DIR / "default.keras"
 DEFAULT_WEIGHTS = WEIGHTS_DIR / "best.pt"
 FALLBACK_WEIGHTS = _project_root / "best.pt"
 
-jobs = {}
+jobs = JobStore()
+
+
+def _ffmpeg_available() -> bool:
+    return Path(FFMPEG_CMD).is_file() or shutil.which(FFMPEG_CMD) is not None
 
 
 def create_pluck_filtered_video(
@@ -163,7 +167,7 @@ def create_pluck_filtered_video(
                                 try:
                                     dist = float(dist_px)
                                     label += f" {dist:.0f}px"
-                                except:
+                                except (TypeError, ValueError):
                                     pass
                             
                             # Draw text label with background for visibility
@@ -198,7 +202,7 @@ def _reencode_to_h264(video_path: str) -> str:
     h264_path = video_path.replace(".mp4", "_h264.mp4")
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", video_path, "-c:v", "libx264", "-preset", "fast",
+            [FFMPEG_CMD, "-y", "-i", video_path, "-c:v", "libx264", "-preset", "fast",
              "-crf", "23", "-c:a", "copy", "-movflags", "+faststart", h264_path],
             check=True, capture_output=True, timeout=600,
         )
@@ -215,28 +219,63 @@ def _reencode_to_h264(video_path: str) -> str:
 
 def run_job_audio(job_id: str, model_path: str, video_path: str, use_yin_fallback: bool):
     try:
-        jobs[job_id] = {"status": "running", "message": "Processing (audio)..."}
+        jobs.set_stage(
+            job_id,
+            status="running",
+            stage="audio_analysis",
+            message="Detecting audio onsets and string labels…",
+            progress=20,
+        )
         csv_path, video_out_path, df = run_pipeline(
             model_path, video_path, str(OUTPUT_DIR / job_id), use_yin_fallback=use_yin_fallback
         )
-        # Re-encode to H.264 for browser playback
+        jobs.set_stage(
+            job_id,
+            status="running",
+            stage="video_encoding",
+            message="Preparing the annotated video…",
+            progress=85,
+        )
         video_out_path = _reencode_to_h264(video_out_path)
-        jobs[job_id] = {
-            "status": "done",
-            "csv_path": csv_path,
-            "video_path": video_out_path,
-            "rows": len(df),
-        }
+        jobs.set_stage(
+            job_id,
+            status="done",
+            stage="complete",
+            message="Analysis complete.",
+            progress=100,
+            csv_path=csv_path,
+            manifest_path=str(Path(csv_path).with_name("inference_manifest.json")),
+            video_path=video_out_path,
+            rows=len(df),
+        )
     except Exception as e:
-        jobs[job_id] = {"status": "error", "message": str(e)}
+        jobs.set_stage(
+            job_id,
+            status="error",
+            stage="failed",
+            message=str(e),
+            progress=100,
+        )
 
 
 def run_job_hand(job_id: str, video_path: str, weights_path: str | None):
     if run_hand_detector is None:
-        jobs[job_id] = {"status": "error", "message": "Hand detector not available (harp_hand_detector not found)."}
+        jobs.set_stage(
+            job_id,
+            status="error",
+            stage="failed",
+            message="Hand detector not available (harp_hand_detector not found).",
+            progress=100,
+        )
         return
     try:
-        jobs[job_id] = {"status": "running", "message": "Processing (hand detection)..."}
+        jobs.set_stage(
+            job_id,
+            status="running",
+            stage="hand_analysis",
+            message="Tracking hands and harp strings…",
+            progress=20,
+        )
         out_dir = str(OUTPUT_DIR / job_id)
         csv_path, video_out_path = run_hand_detector(
             video_path,
@@ -244,20 +283,36 @@ def run_job_hand(job_id: str, video_path: str, weights_path: str | None):
             preview=False,
             weights_path=weights_path,
         )
-        # Re-encode to H.264 for browser playback
+        jobs.set_stage(
+            job_id,
+            status="running",
+            stage="video_encoding",
+            message="Preparing the annotated video…",
+            progress=85,
+        )
         video_out_path = _reencode_to_h264(video_out_path)
         rows = 0
         if os.path.isfile(csv_path):
             with open(csv_path, "r", encoding="utf-8") as f:
                 rows = max(0, sum(1 for _ in f) - 1)
-        jobs[job_id] = {
-            "status": "done",
-            "csv_path": csv_path,
-            "video_path": video_out_path,
-            "rows": rows,
-        }
+        jobs.set_stage(
+            job_id,
+            status="done",
+            stage="complete",
+            message="Analysis complete.",
+            progress=100,
+            csv_path=csv_path,
+            video_path=video_out_path,
+            rows=rows,
+        )
     except Exception as e:
-        jobs[job_id] = {"status": "error", "message": str(e)}
+        jobs.set_stage(
+            job_id,
+            status="error",
+            stage="failed",
+            message=str(e),
+            progress=100,
+        )
 
 
 def run_job_both(
@@ -270,21 +325,42 @@ def run_job_both(
 ):
     out_dir = str(OUTPUT_DIR / job_id)
     try:
-        jobs[job_id] = {"status": "running", "message": "Processing (audio)..."}
+        jobs.set_stage(
+            job_id,
+            status="running",
+            stage="audio_analysis",
+            message="Detecting audio onsets and string labels…",
+            progress=10,
+        )
         csv_audio, video_audio, df = run_pipeline(
             model_path, video_path, out_dir, use_yin_fallback=use_yin_fallback
         )
-        audio_result = {"csv_path": csv_audio, "video_path": video_audio, "rows": len(df)}
+        audio_result = {
+            "csv_path": csv_audio,
+            "manifest_path": str(Path(csv_audio).with_name("inference_manifest.json")),
+            "video_path": video_audio,
+            "rows": len(df),
+        }
 
         if run_hand_detector is None:
-            jobs[job_id] = {
-                "status": "done",
-                "audio": audio_result,
-                "hand": None,
-                "hand_error": "Hand detector not available (install ultralytics, mediapipe, opencv-python and put best.pt in backend/weights/).",
-            }
+            jobs.set_stage(
+                job_id,
+                status="done",
+                stage="complete_with_warning",
+                message="Audio analysis completed; hand analysis is unavailable.",
+                progress=100,
+                audio=audio_result,
+                hand=None,
+                hand_error="Hand detector not available (install ultralytics, mediapipe, opencv-python and put best.pt in backend/weights/).",
+            )
             return
-        jobs[job_id] = {"status": "running", "message": "Processing (hand)..."}
+        jobs.set_stage(
+            job_id,
+            status="running",
+            stage="hand_analysis",
+            message="Tracking hands and harp strings…",
+            progress=45,
+        )
         try:
             csv_hand, video_hand = run_hand_detector(
                 video_path, output_dir=out_dir, preview=False, weights_path=weights_path
@@ -296,9 +372,15 @@ def run_job_both(
             hand_result = {"csv_path": csv_hand, "video_path": video_hand, "rows": hand_rows}
             
             # Filter hand events to only pluck moments (hand within window BEFORE audio onset)
-            jobs[job_id] = {"status": "running", "message": "Filtering hand events to pluck moments..."}
+            jobs.set_stage(
+                job_id,
+                status="running",
+                stage="event_alignment",
+                message="Aligning hand contacts with audio onsets…",
+                progress=72,
+            )
             audio_onsets = df["time_sec"].tolist() if "time_sec" in df.columns else []
-            PLUCK_WINDOW = 0.15  # 150ms before onset only (finger on string just before pluck)
+            pluck_window = settings.hand_pre_onset_sec
             
             filtered_hand_csv = os.path.join(out_dir, "hand_filtered.csv")
             hand_events_at_plucks = []
@@ -319,7 +401,7 @@ def run_job_both(
                                 
                                 # Only include hand event if it's within window BEFORE an onset
                                 for onset_time in audio_onsets:
-                                    if onset_time - PLUCK_WINDOW <= hand_time <= onset_time:
+                                    if onset_time - pluck_window <= hand_time <= onset_time:
                                         hand_events_at_plucks.append(hand_row)
                                         break
                             except ValueError:
@@ -337,7 +419,13 @@ def run_job_both(
                     print(f"Warning: Could not filter hand events: {e}")
             
             # Create combined video: hand/string at plucks + original audio + SRT subtitles (top)
-            jobs[job_id] = {"status": "running", "message": "Combining results..."}
+            jobs.set_stage(
+                job_id,
+                status="running",
+                stage="result_composition",
+                message="Composing the synchronized result…",
+                progress=82,
+            )
             combined_video = os.path.join(out_dir, "video_combined.mp4")
             ass_path = os.path.join(out_dir, "overlay.ass")
             srt_path = os.path.join(out_dir, "overlay.srt")
@@ -348,21 +436,31 @@ def run_job_both(
                 combined_error = f"Hand video not found: {video_hand}"
             else:
                 # Create video with hand annotations only at pluck moments (labels already at top)
-                jobs[job_id] = {"status": "running", "message": "Creating pluck-filtered video..."}
+                jobs.set_stage(
+                    job_id,
+                    status="running",
+                    stage="video_encoding",
+                    message="Rendering the annotated video…",
+                    progress=90,
+                )
                 pluck_filtered_video = os.path.join(out_dir, "hand_plucks_only.mp4")
                 try:
                     cap = cv2.VideoCapture(original_video_path)
                     fps_vid = cap.get(cv2.CAP_PROP_FPS) or 30.0
                     cap.release()
                     create_pluck_filtered_video(
-                        original_video_path, csv_hand, audio_onsets, pluck_filtered_video, fps_vid
+                        original_video_path,
+                        csv_hand,
+                        audio_onsets,
+                        pluck_filtered_video,
+                        fps_vid,
+                        pluck_window,
                     )
                 except Exception as e:
                     print(f"Warning: Could not create pluck-filtered video: {e}")
                     pluck_filtered_video = video_hand  # Fallback to full hand video
                 
                 # Burn subtitles: prefer ASS (fixed position), else SRT
-                from inference import FFMPEG_CMD
                 try:
                     if os.path.isfile(ass_path):
                         overlay_abs = os.path.abspath(ass_path).replace("\\", "/")
@@ -419,140 +517,183 @@ def run_job_both(
                 except Exception as e:
                     combined_error = f"Error creating combined video: {str(e)}"
             
-            jobs[job_id] = {
-                "status": "done",
-                "audio": audio_result,
-                "hand": hand_result,
-                "combined": combined_result,
-                "combined_error": combined_error,
-            }
+            jobs.set_stage(
+                job_id,
+                status="done",
+                stage="complete",
+                message="Analysis complete.",
+                progress=100,
+                audio=audio_result,
+                hand=hand_result,
+                combined=combined_result,
+                combined_error=combined_error,
+            )
         except Exception as hand_err:
-            jobs[job_id] = {
-                "status": "done",
-                "audio": audio_result,
-                "hand": None,
-                "hand_error": str(hand_err),
-            }
+            jobs.set_stage(
+                job_id,
+                status="done",
+                stage="complete_with_warning",
+                message="Audio analysis completed; hand analysis failed.",
+                progress=100,
+                audio=audio_result,
+                hand=None,
+                hand_error=str(hand_err),
+            )
     except Exception as e:
-        jobs[job_id] = {"status": "error", "message": str(e)}
+        jobs.set_stage(
+            job_id,
+            status="error",
+            stage="failed",
+            message=str(e),
+            progress=100,
+        )
 
 
-@app.post("/api/upload")
+async def _resolve_audio_model(
+    upload: UploadFile | None,
+    use_default: bool,
+    job_dir: Path,
+) -> str:
+    if use_default:
+        if not DEFAULT_MODEL.exists():
+            raise HTTPException(503, "The bundled audio model is not installed.")
+        return str(DEFAULT_MODEL)
+    if not settings.allow_custom_model_uploads:
+        raise HTTPException(403, "Custom model uploads are disabled on this server.")
+    if not upload or not upload.filename:
+        raise HTTPException(400, "Choose a .keras audio model or use the bundled model.")
+    path = await save_upload(
+        upload,
+        job_dir,
+        fallback="model.keras",
+        allowed_suffixes={".keras"},
+        max_bytes=settings.max_model_bytes,
+    )
+    return str(path)
+
+
+async def _resolve_hand_weights(
+    upload: UploadFile | None,
+    use_default: bool,
+    job_dir: Path,
+) -> str:
+    if use_default:
+        if DEFAULT_WEIGHTS.exists():
+            return str(DEFAULT_WEIGHTS)
+        if FALLBACK_WEIGHTS.exists():
+            return str(FALLBACK_WEIGHTS)
+        raise HTTPException(503, "The bundled hand model is not installed.")
+    if not settings.allow_custom_model_uploads:
+        raise HTTPException(403, "Custom model uploads are disabled on this server.")
+    if not upload or not upload.filename:
+        raise HTTPException(400, "Choose a .pt hand model or use the bundled model.")
+    path = await save_upload(
+        upload,
+        job_dir,
+        fallback="weights.pt",
+        allowed_suffixes={".pt"},
+        max_bytes=settings.max_weights_bytes,
+    )
+    return str(path)
+
+
+@app.post("/api/upload", status_code=202)
 async def upload_and_run(
     background_tasks: BackgroundTasks,
     method: str = Form("audio"),
-    use_default_model: str = Form("false"),
+    use_default_model: str = Form("true"),
     model: UploadFile = File(None),
     video: UploadFile = File(...),
     mode: str = Form("hybrid"),
-    use_default_weights: str = Form("false"),
+    use_default_weights: str = Form("true"),
     weights: UploadFile = File(None),
 ):
-    if not video.filename.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm")):
-        raise HTTPException(400, "Video must be .mp4, .mov, .mkv, .avi, or .webm")
-
-    method = method.lower()
-    if method not in ("audio", "hand", "both"):
+    method = method.strip().lower()
+    mode = mode.strip().lower()
+    if method not in {"audio", "hand", "both"}:
         raise HTTPException(400, "method must be 'audio', 'hand', or 'both'")
+    if mode not in {"default", "hybrid"}:
+        raise HTTPException(400, "mode must be 'default' or 'hybrid'")
+    if method in {"audio", "both"} and not _ffmpeg_available():
+        raise HTTPException(503, "FFmpeg is required for audio analysis but is not installed.")
 
     job_id = str(uuid.uuid4())
     job_dir = UPLOAD_DIR / job_id
-    job_dir.mkdir(parents=True)
-    (OUTPUT_DIR / job_id).mkdir(parents=True, exist_ok=True)
+    output_dir = OUTPUT_DIR / job_id
 
-    video_path = job_dir / (video.filename or "video.mp4")
     try:
-        with open(video_path, "wb") as f:
-            f.write(await video.read())
-    except Exception as e:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(500, f"Save video failed: {e}")
+        video_path = await save_upload(
+            video,
+            job_dir,
+            fallback="performance.mp4",
+            allowed_suffixes={".mp4", ".mov", ".mkv", ".avi", ".webm"},
+            max_bytes=settings.max_video_bytes,
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    if method == "audio":
-        use_default = use_default_model.lower() == "true"
-        if use_default and DEFAULT_MODEL.exists():
-            model_path = str(DEFAULT_MODEL)
-        elif model and model.filename and model.filename.lower().endswith(".keras"):
-            model_path = job_dir / (model.filename or "model.keras")
-            try:
-                with open(model_path, "wb") as f:
-                    f.write(await model.read())
-            except Exception as e:
-                shutil.rmtree(job_dir, ignore_errors=True)
-                raise HTTPException(500, f"Save model failed: {e}")
-            model_path = str(model_path)
-        else:
-            raise HTTPException(
-                400,
-                "For audio detection, upload a .keras model file or place default.keras in backend/models/ and use 'Use default model'.",
-            )
-        use_yin = mode.lower() == "hybrid"
-        jobs[job_id] = {"status": "queued"}
-        background_tasks.add_task(run_job_audio, job_id, model_path, str(video_path), use_yin)
-    elif method == "both":
-        use_default = use_default_model.lower() == "true"
-        if use_default and DEFAULT_MODEL.exists():
-            model_path = str(DEFAULT_MODEL)
-        elif model and model.filename and model.filename.lower().endswith(".keras"):
-            model_path = job_dir / (model.filename or "model.keras")
-            try:
-                with open(model_path, "wb") as f:
-                    f.write(await model.read())
-            except Exception as e:
-                shutil.rmtree(job_dir, ignore_errors=True)
-                raise HTTPException(500, f"Save model failed: {e}")
-            model_path = str(model_path)
-        else:
-            raise HTTPException(
-                400,
-                "For both, upload a .keras model file or place default.keras in backend/models/ and use 'Use default model'.",
-            )
-        use_yin = mode.lower() == "hybrid"
+        model_path = None
         weights_path = None
-        use_default_w = use_default_weights.lower() == "true"
-        if weights and weights.filename and weights.filename.lower().endswith(".pt"):
-            wpath = job_dir / (weights.filename or "weights.pt")
-            try:
-                with open(wpath, "wb") as f:
-                    f.write(await weights.read())
-            except Exception as e:
-                shutil.rmtree(job_dir, ignore_errors=True)
-                raise HTTPException(500, f"Save weights failed: {e}")
-            weights_path = str(wpath)
-        elif use_default_w or not (weights and weights.filename):
-            if DEFAULT_WEIGHTS.exists():
-                weights_path = str(DEFAULT_WEIGHTS)
-            elif FALLBACK_WEIGHTS.exists():
-                weights_path = str(FALLBACK_WEIGHTS)
-        jobs[job_id] = {"status": "queued"}
+        if method in {"audio", "both"}:
+            model_path = await _resolve_audio_model(
+                model,
+                use_default_model.strip().lower() == "true",
+                job_dir,
+            )
+        if method in {"hand", "both"}:
+            weights_path = await _resolve_hand_weights(
+                weights,
+                use_default_weights.strip().lower() == "true",
+                job_dir,
+            )
+    except UploadValidationError as error:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(400, str(error)) from error
+    except HTTPException:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+    except Exception as error:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(500, "The upload could not be saved.") from error
+
+    jobs.set_stage(
+        job_id,
+        status="queued",
+        stage="queued",
+        message="Waiting to start analysis…",
+        progress=0,
+        method=method,
+    )
+    use_yin = mode == "hybrid"
+    if method == "audio":
         background_tasks.add_task(
-            run_job_both, job_id, model_path, str(video_path), use_yin, weights_path, str(video_path)
+            run_job_audio,
+            job_id,
+            model_path,
+            str(video_path),
+            use_yin,
+        )
+    elif method == "hand":
+        background_tasks.add_task(
+            run_job_hand,
+            job_id,
+            str(video_path),
+            weights_path,
         )
     else:
-        weights_path = None
-        if weights and weights.filename and weights.filename.lower().endswith(".pt"):
-            weights_path = job_dir / (weights.filename or "weights.pt")
-            try:
-                with open(weights_path, "wb") as f:
-                    f.write(await weights.read())
-            except Exception as e:
-                shutil.rmtree(job_dir, ignore_errors=True)
-                raise HTTPException(500, f"Save weights failed: {e}")
-            weights_path = str(weights_path)
-        else:
-            if DEFAULT_WEIGHTS.exists():
-                weights_path = str(DEFAULT_WEIGHTS)
-            elif FALLBACK_WEIGHTS.exists():
-                weights_path = str(FALLBACK_WEIGHTS)
-            else:
-                raise HTTPException(
-                    400,
-                    "For hand detection, upload a .pt weights file or place best.pt in backend/weights/ or project root.",
-                )
-        jobs[job_id] = {"status": "queued"}
-        background_tasks.add_task(run_job_hand, job_id, str(video_path), weights_path)
+        background_tasks.add_task(
+            run_job_both,
+            job_id,
+            model_path,
+            str(video_path),
+            use_yin,
+            weights_path,
+            str(video_path),
+        )
 
-    return {"job_id": job_id, "status": "queued"}
+    return {"job_id": job_id, "status": "queued", "stage": "queued", "progress": 0}
 
 
 @app.get("/api/status/{job_id}")
@@ -607,6 +748,26 @@ def download_video(job_id: str, type: str = Query(None, alias="type")):
     return FileResponse(path, filename=filename, media_type="video/mp4")
 
 
+@app.get("/api/download/manifest/{job_id}")
+def download_manifest(job_id: str):
+    """Download the reproducibility manifest for an audio-capable job."""
+    if job_id not in jobs or jobs[job_id].get("status") != "done":
+        raise HTTPException(404, "Job not ready or not found")
+    job = jobs[job_id]
+    path = (
+        job.get("audio", {}).get("manifest_path")
+        if job.get("audio")
+        else job.get("manifest_path")
+    )
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, "Inference manifest not found")
+    return FileResponse(
+        path,
+        filename="harp_inference_manifest.json",
+        media_type="application/json",
+    )
+
+
 @app.get("/api/video-url/{job_id}")
 def get_video_url(job_id: str, type: str = Query(None, alias="type")):
     """Get video URL for preview (returns URL path, not file download)."""
@@ -641,8 +802,7 @@ def get_logs(job_id: str):
     job = jobs[job_id]
     events = []
     audio_onsets = []
-    PLUCK_WINDOW = 0.15  # Only consider hand 0–150ms BEFORE onset (finger on string)
-    TRACKING_WINDOW = 0.5  # Window to determine if hand event is "tracking" vs "detected"
+    pluck_window = settings.hand_pre_onset_sec
     
     # Determine paths based on job structure
     audio_csv = job.get("audio", {}).get("csv_path") if "audio" in job and job["audio"] else None
@@ -701,13 +861,16 @@ def get_logs(job_id: str):
                         sec_part = float(parts[1])
                         hand_time = minutes * 60 + sec_part
                         dist_px = float(row.get("dist_px", 0)) if row.get("dist_px") else 0.0
-                        max_dist = 20.0
-                        confidence = max(0.0, min(1.0, 1.0 - (dist_px / max_dist))) if dist_px > 0 else 0.5
+                        threshold_px = float(row.get("touch_threshold_px") or 20.0)
+                        confidence = normalized_touch_confidence(dist_px, threshold_px)
                         hand_rows.append({
                             "time": hand_time,
                             "string": row.get("string", "?"),
+                            "hand": row.get("hand", ""),
                             "finger": row.get("finger", ""),
                             "distance": dist_px,
+                            "frame": int(row.get("frame") or 0),
+                            "touch_threshold": threshold_px,
                             "confidence": confidence,
                         })
                     except (ValueError, KeyError):
@@ -720,8 +883,12 @@ def get_logs(job_id: str):
                 if n_strings <= 0:
                     continue
                 audio_strings_at_onset = {e["string"] for e in events if e.get("type") == "audio" and e.get("time") == onset_time}
-                # Hand must be in [onset - PLUCK_WINDOW, onset]; rank by how close to onset (before)
-                matches = [(onset_time - h["time"], h) for h in hand_rows if (onset_time - PLUCK_WINDOW <= h["time"] <= onset_time)]
+                # Hand must be inside the configured pre-onset window; rank by temporal proximity.
+                matches = [
+                    (onset_time - hand["time"], hand)
+                    for hand in hand_rows
+                    if onset_time - pluck_window <= hand["time"] <= onset_time
+                ]
                 best_by_key = {}
                 for dt, h in matches:
                     s = str(h["string"]).strip()
@@ -755,8 +922,10 @@ def get_logs(job_id: str):
                         "type": "hand",
                         "string": string_display,
                         "finger": h["finger"],
+                        "hand": h["hand"],
                         "distance": h["distance"],
-                        "frame": 0,
+                        "frame": h["frame"],
+                        "touch_threshold": h["touch_threshold"],
                         "status": "detected",
                         "confidence": h["confidence"],
                     })
@@ -775,14 +944,21 @@ def get_logs(job_id: str):
                         try:
                             hand_time = int(parts[0]) * 60 + float(parts[1])  # MM:SS.mm
                             dist_px = float(row.get("dist_px", 0)) if row.get("dist_px") else 0.0
-                            confidence = max(0.0, min(1.0, 1.0 - (dist_px / 20.0))) if dist_px > 0 else 0.5
+                            threshold_px = float(row.get("touch_threshold_px") or 20.0)
+                            confidence = normalized_touch_confidence(dist_px, threshold_px)
                             events.append({
                                 "time": hand_time,
                                 "type": "hand",
-                                "string": f"S{row.get('string', '?')}",
+                                "string": (
+                                    str(row.get("string", "?")).strip()
+                                    if str(row.get("string", "?")).strip().upper().startswith("S")
+                                    else f"S{str(row.get('string', '?')).strip()}"
+                                ),
                                 "finger": row.get("finger", ""),
+                                "hand": row.get("hand", ""),
                                 "distance": dist_px,
-                                "frame": 0,
+                                "frame": int(row.get("frame") or 0),
+                                "touch_threshold": threshold_px,
                                 "status": "detected",
                                 "confidence": confidence,
                             })
@@ -803,10 +979,36 @@ def get_logs(job_id: str):
 
 @app.get("/api/defaults")
 def get_defaults():
-    """Report whether bundled default model and weights exist (so frontend can show 'Use default' options)."""
+    """Report runtime capabilities needed to configure the analysis workflow."""
     return {
         "default_model": DEFAULT_MODEL.exists(),
         "default_weights": DEFAULT_WEIGHTS.exists() or FALLBACK_WEIGHTS.exists(),
+        "hand_detector_available": run_hand_detector is not None,
+        "ffmpeg_available": _ffmpeg_available(),
+        "allow_custom_model_uploads": settings.allow_custom_model_uploads,
+        "max_video_mb": settings.max_video_bytes // (1024 * 1024),
+        "hand_pre_onset_ms": int(round(settings.hand_pre_onset_sec * 1000)),
+        "calibrated_thresholds": bool(os.getenv("HARP_THRESHOLDS_PATH", "").strip()),
+        "supported_video_extensions": ["mp4", "mov", "mkv", "avi", "webm"],
+    }
+
+
+@app.get("/api/health")
+def get_health():
+    hand_weights_available = DEFAULT_WEIGHTS.exists() or FALLBACK_WEIGHTS.exists()
+    ffmpeg_available = _ffmpeg_available()
+    ready = (
+        DEFAULT_MODEL.exists()
+        and hand_weights_available
+        and run_hand_detector is not None
+        and ffmpeg_available
+    )
+    return {
+        "status": "ready" if ready else "degraded",
+        "audio_model": DEFAULT_MODEL.exists(),
+        "hand_weights": hand_weights_available,
+        "hand_detector": run_hand_detector is not None,
+        "ffmpeg": ffmpeg_available,
     }
 
 
@@ -825,9 +1027,10 @@ async def google_auth(auth_req: GoogleAuthRequest):
     Verify the Google OAuth token sent from the frontend.
     """
     try:
-        # Securely pull from environment variables, or fallback to the provided values if testing locally
-        CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "YOUR_GOOGLE_CLIENT_ID_HERE")
-        CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "YOUR_GOOGLE_CLIENT_SECRET_HERE")
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
 
         # Exchange auth code for access_token and id_token
         import requests as http_requests
@@ -835,17 +1038,18 @@ async def google_auth(auth_req: GoogleAuthRequest):
             "https://oauth2.googleapis.com/token",
             data={
                 "code": auth_req.token,
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "redirect_uri": "postmessage", # Required for @react-oauth/google useGoogleLogin flow='auth-code'
                 "grant_type": "authorization_code",
-            }
+            },
+            timeout=15,
         )
+        token_response.raise_for_status()
 
         token_data = token_response.json()
         
         if "error" in token_data:
-            print(f"Error from Google token exchange: {token_data}")
             raise ValueError(token_data.get("error_description", "Token exchange failed"))
 
         id_token_str = token_data.get("id_token")
@@ -856,7 +1060,7 @@ async def google_auth(auth_req: GoogleAuthRequest):
         info = id_token.verify_oauth2_token(
             id_token_str,
             requests.Request(),
-            CLIENT_ID,
+            client_id,
             clock_skew_in_seconds=10
         )
         
@@ -878,8 +1082,10 @@ async def google_auth(auth_req: GoogleAuthRequest):
                 "picture": picture
             }
         }
+    except HTTPException:
+        raise
     except ValueError as e:
         # Invalid token
-        raise HTTPException(status_code=401, detail=f"Invalid Google token: {str(e)}")
+        raise HTTPException(status_code=401, detail="Google sign-in could not be verified.") from e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Auth error: {str(e)}")
+        raise HTTPException(status_code=502, detail="Google sign-in is temporarily unavailable.") from e

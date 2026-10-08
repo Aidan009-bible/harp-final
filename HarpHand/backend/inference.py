@@ -2,10 +2,14 @@
 # Adapted from Colab pipeline for local/API use.
 
 import os
+import hashlib
+import json
 import shutil
 import subprocess
 from pathlib import Path
 import numpy as np
+
+from core.calibration import load_thresholds
 
 # Resolve ffmpeg to full path so subprocess finds it (Windows often misses PATH in child processes)
 def _resolve_ffmpeg():
@@ -40,6 +44,7 @@ N_FFT = 1024
 HOP = 256
 F_NFFT = 4096
 F_HOP = 256
+ONSET_HOP = 512
 
 # Default: single threshold for all strings (first Colab way)
 THR_DEFAULT = 0.25
@@ -61,6 +66,30 @@ HARP_STRINGS = {
     13: 146.83, 14: 130.81, 15: 110.00, 16: 98.00,
 }
 FREQS = np.array([HARP_STRINGS[i] for i in range(1, 17)], dtype=np.float32)
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_thresholds(use_yin_fallback: bool) -> tuple[np.ndarray, str, bool]:
+    fallback = THR_ARRAY if use_yin_fallback else np.full(
+        NUM_STRINGS,
+        THR_DEFAULT,
+        dtype=np.float32,
+    )
+    configured_path = os.getenv("HARP_THRESHOLDS_PATH", "").strip()
+    if not configured_path:
+        profile = "built-in-hybrid" if use_yin_fallback else "built-in-default"
+        return np.asarray(fallback, dtype=np.float32), profile, False
+
+    threshold_path = Path(configured_path).expanduser().resolve()
+    calibrated = load_thresholds(threshold_path)
+    return np.asarray(calibrated, dtype=np.float32), str(threshold_path), True
 
 
 def string_energy_vector(y, sr, n_fft=F_NFFT, hop=F_HOP, n_harm=5, cents_width=35):
@@ -103,6 +132,8 @@ def clip_to_mel_and_vec(y, sr=SAMPLE_RATE):
 
 
 def yin_string_from_segment(seg, sr):
+    if seg is None or len(seg) < 32:
+        return None, None
     f0 = librosa.yin(seg, fmin=90, fmax=800, sr=sr)
     f0 = f0[np.isfinite(f0)]
     f0 = f0[f0 > 0]
@@ -114,10 +145,10 @@ def yin_string_from_segment(seg, sr):
 
 
 def srt_time(t):
-    h = int(t // 3600)
-    m = int((t % 3600) // 60)
-    s = int(t % 60)
-    ms = int(round((t - int(t)) * 1000))
+    total_ms = max(0, int(round(float(t) * 1000)))
+    total_seconds, ms = divmod(total_ms, 1000)
+    h, remainder = divmod(total_seconds, 3600)
+    m, s = divmod(remainder, 60)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -152,37 +183,89 @@ def run_pipeline(model_path: str, video_path: str, output_dir: str, use_yin_fall
         wav_path
     ], check=True, capture_output=True)
 
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(model_path, compile=False, safe_mode=True)
+    if len(model.inputs) != 2:
+        raise ValueError("Audio model must accept mel-spectrogram and 16-value energy inputs.")
+    output_width = model.output_shape[-1]
+    if output_width != NUM_STRINGS:
+        raise ValueError(f"Audio model must return {NUM_STRINGS} string probabilities, got {output_width}.")
 
     y, sr = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True)
-    onsets = librosa.onset.onset_detect(y=y, sr=sr, units="time", backtrack=True)
+    onset_envelope = librosa.onset.onset_strength(y=y, sr=sr, hop_length=ONSET_HOP)
+    peak_frames = librosa.onset.onset_detect(
+        onset_envelope=onset_envelope,
+        sr=sr,
+        hop_length=ONSET_HOP,
+        units="frames",
+        backtrack=False,
+    )
+    onset_frames = librosa.onset.onset_backtrack(peak_frames, onset_envelope)
+    onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=ONSET_HOP)
+    onset_scale = float(np.max(onset_envelope)) if onset_envelope.size else 0.0
 
     accepted = []
     last_t = -1e9
-    for t in onsets:
+    for t, peak_frame in zip(onset_times, peak_frames):
         if (t - last_t) >= HOLD_SEC:
-            accepted.append(float(t))
+            raw_strength = float(onset_envelope[int(peak_frame)])
+            accepted.append(
+                (
+                    float(t),
+                    raw_strength,
+                    raw_strength / onset_scale if onset_scale > 0 else 0.0,
+                )
+            )
             last_t = float(t)
-    onsets = np.array(accepted, dtype=float)
 
-    thr = THR_ARRAY if use_yin_fallback else np.full(NUM_STRINGS, THR_DEFAULT, dtype=np.float32)
+    thr, threshold_profile, uses_calibrated_thresholds = _resolve_thresholds(use_yin_fallback)
+    manifest = {
+        "schema_version": 1,
+        "model": {
+            "filename": Path(model_path).name,
+            "sha256": _sha256(model_path),
+            "input_shapes": [list(tensor.shape) for tensor in model.inputs],
+            "output_shape": list(model.output_shape),
+        },
+        "inference": {
+            "mode": "hybrid" if use_yin_fallback else "default",
+            "sample_rate": SAMPLE_RATE,
+            "clip_seconds": CLIP_SEC,
+            "minimum_event_gap_seconds": HOLD_SEC,
+            "onset_hop_samples": ONSET_HOP,
+            "model_confidence_minimum": MODEL_CONF_MIN,
+            "threshold_profile": threshold_profile,
+            "thresholds": {
+                f"S{string_id}": float(thr[string_id - 1])
+                for string_id in range(1, NUM_STRINGS + 1)
+            },
+        },
+        "runtime": {
+            "numpy": np.__version__,
+            "librosa": librosa.__version__,
+            "tensorflow": tf.__version__,
+        },
+    }
+    manifest_path = Path(output_dir) / "inference_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     rows = []
-    for t in onsets:
+    for t, onset_strength, onset_strength_normalized in accepted:
         start = int((t + OFFSET_SEC) * sr)
         start = max(0, start)
         clip = y[start : start + CLIP_SAMPLES]
         mel, vec = clip_to_mel_and_vec(clip, sr)
-        probs = model.predict([mel[None, ...], vec[None, ...]], verbose=0)[0]
+        probs = np.asarray(model.predict([mel[None, ...], vec[None, ...]], verbose=0)[0], dtype=np.float32)
+        if probs.shape != (NUM_STRINGS,) or not np.all(np.isfinite(probs)):
+            raise ValueError("Audio model returned an invalid prediction vector.")
         top1 = int(np.argmax(probs)) + 1
         top1_prob = float(np.max(probs))
         pred = (probs >= thr).astype(int)
         active = np.where(pred == 1)[0] + 1
-        # Include top-1 if not already in active, and top-2 when above display threshold (so "4,9" can show)
-        if top1 not in active:
+        # Keep a top prediction only when it clears the minimum confidence gate.
+        if not uses_calibrated_thresholds and top1 not in active and top1_prob >= MODEL_CONF_MIN:
             active = np.append(active, top1)
         sorted_idx = np.argsort(probs)[::-1]
-        if len(sorted_idx) > 1:
+        if not uses_calibrated_thresholds and len(sorted_idx) > 1:
             top2 = int(sorted_idx[1]) + 1
             top2_prob = float(probs[sorted_idx[1]])
             if top2 not in active and top2_prob >= TOP2_DISPLAY_THR:
@@ -202,9 +285,12 @@ def run_pipeline(model_path: str, video_path: str, output_dir: str, use_yin_fall
 
         row = {
             "time_sec": float(t),
+            "onset_strength": onset_strength,
+            "onset_strength_normalized": onset_strength_normalized,
             "predicted_strings": ",".join(map(str, active)) if len(active) else "",
             "top1": top1,
             "top1_prob": top1_prob,
+            "threshold_profile": threshold_profile,
             **{f"prob_S{i+1}": float(probs[i]) for i in range(NUM_STRINGS)},
             **{f"pred_S{i+1}": int(pred[i]) for i in range(NUM_STRINGS)},
         }
@@ -212,7 +298,20 @@ def run_pipeline(model_path: str, video_path: str, output_dir: str, use_yin_fall
             row["used"] = used
         rows.append(row)
 
-    df = pd.DataFrame(rows)
+    prediction_columns = [
+        "time_sec",
+        "onset_strength",
+        "onset_strength_normalized",
+        "predicted_strings",
+        "top1",
+        "top1_prob",
+        "threshold_profile",
+        *[f"prob_S{index}" for index in range(1, NUM_STRINGS + 1)],
+        *[f"pred_S{index}" for index in range(1, NUM_STRINGS + 1)],
+    ]
+    if use_yin_fallback:
+        prediction_columns.append("used")
+    df = pd.DataFrame(rows, columns=prediction_columns)
     csv_name = "predictions_hybrid.csv" if use_yin_fallback else "predictions_default.csv"
     csv_path = os.path.join(output_dir, csv_name)
     df.to_csv(csv_path, index=False)

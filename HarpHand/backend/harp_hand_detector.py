@@ -1,6 +1,6 @@
-# harp_hand_detector.py  v5 — Orientation-Agnostic String Detection
-# Works for any string angle: horizontal, vertical, diagonal.
-# Each string is a line segment (two endpoints) derived from YOLO bbox.
+# harp_hand_detector.py v6 — Resolution-Aware String Contact Detection
+# Each string is approximated by a centerline along the dominant axis of its
+# YOLO bounding box. True rotated geometry requires oriented boxes or masks.
 # Touch = fingertip closest to a string centerline within threshold.
 # pip install ultralytics mediapipe==0.10.9 opencv-python numpy
 
@@ -22,6 +22,8 @@ except ImportError:
         raise ImportError(f"MediaPipe not installed: {e}")
 from collections import defaultdict
 
+from core.hand_geometry import adaptive_touch_distance_px
+
 # ============================= CONFIG =============================
 WEIGHTS       = "best.pt"
 IMGSZ         = 640             # 960 = more accurate but slower; 640 = faster
@@ -29,7 +31,9 @@ CONF          = 0.08
 IOU_THRESH    = 0.40
 NUM_STRINGS   = 16
 MODEL_HISTORY = 80
-TOUCH_DIST_PX = 20             # max distance from fingertip to string
+TOUCH_DIST_RATIO = 0.0185      # fraction of the shorter frame edge
+TOUCH_DIST_MIN_PX = 6
+TOUCH_DIST_MAX_PX = 32
 TOUCH_CONSEC  = 1              # instant detection (plucks are 1-2 frames)
 FRAME_SKIP    = 2              # run YOLO every Nth frame only (1=every frame; 2=~faster); MediaPipe runs every frame
 OUTPUT_DIR    = "output"
@@ -96,13 +100,14 @@ def extract_boxes(result, conf_thr, iou_thr):
                 cid=int(c), conf=float(confs[idx])))
     return out
 
-# ============= GEOMETRY: orientation-agnostic =============
+# ============= GEOMETRY: dominant-axis approximation =============
 
 def bbox_to_centerline(x1, y1, x2, y2):
     """
     Convert a bounding box into a centerline segment (two endpoints).
     The centerline runs along the LONG axis of the bbox.
-    Works for horizontal, vertical, and diagonal strings.
+    Standard YOLO boxes do not encode rotation, so diagonal strings are an
+    approximation here rather than a claimed exact line fit.
     """
     w, h = x2 - x1, y2 - y1
     if w >= h:
@@ -136,7 +141,7 @@ def point_to_segment_dist(px, py, ax, ay, bx, by):
 
 class StringModel:
     """
-    Orientation-agnostic string model.
+    Temporal string-line model.
     Each string stored as a centerline: two endpoints (ax,ay) → (bx,by).
     Accumulates observations over time, fits polynomial for interpolation.
     """
@@ -215,11 +220,12 @@ def detect_touches(fingertips, model, yolo_boxes, dist_thr):
     """
     For each fingertip, find the SINGLE closest string (from model or
     YOLO boxes). This prevents one finger from "touching" multiple strings.
-    Returns list of (finger_name, lm_idx, sid, sname, dist, snap_x, snap_y).
+    Returns (hand_index, finger_name, landmark_index, string_id, string_name,
+    distance, snapped_x, snapped_y) tuples.
     """
     results = []
 
-    for lm_idx, fname, px, py in fingertips:
+    for hand_index, lm_idx, fname, px, py in fingertips:
         best_sid  = -1
         best_dist = dist_thr + 1
         best_snap = (0, 0)
@@ -241,7 +247,7 @@ def detect_touches(fingertips, model, yolo_boxes, dist_thr):
                 best_dist, best_sid, best_snap = d, sid, (sx, sy)
 
         if best_sid >= 0 and best_dist <= dist_thr:
-            results.append((fname, lm_idx, best_sid, f"S{best_sid+1}",
+            results.append((hand_index, fname, lm_idx, best_sid, f"S{best_sid+1}",
                             best_dist, best_snap[0], best_snap[1]))
 
     return results
@@ -332,11 +338,11 @@ def draw_subtitle(frame, touches, W, H):
 
     seen = set()
     parts = []
-    for fn, _, sid, sn, dist, _, _ in touches:
-        key = (sn, fn)
+    for hand_index, fn, _, sid, sn, dist, _, _ in touches:
+        key = (hand_index, sn, fn)
         if key not in seen:
             seen.add(key)
-            parts.append(f"{sn} ({fn})")
+            parts.append(f"{sn} ({fn}, H{hand_index + 1})")
     text = "  |  ".join(parts)
     tsz = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.60, 2)[0]
     tx = max(10, (W - tsz[0]) // 2)
@@ -365,23 +371,43 @@ def draw_hud(frame, model, n_hands, fps_p, fidx, total):
 def log_touch(ev, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     new = not os.path.exists(path)
-    with open(path, "a", newline="") as f:
+    with open(path, "a", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["time", "frame", "finger", "string", "sid", "dist_px"])
-        w.writerow([ev["ts"], ev["frame"], ev["finger"],
-                     ev["string"], ev["sid"], f"{ev['dist']:.1f}"])
+            w.writerow([
+                "time",
+                "frame",
+                "hand",
+                "finger",
+                "string",
+                "sid",
+                "dist_px",
+                "touch_threshold_px",
+                "dist_ratio",
+            ])
+        w.writerow([
+            ev["ts"],
+            ev["frame"],
+            ev["hand"],
+            ev["finger"],
+            ev["string"],
+            ev["sid"],
+            f"{ev['dist']:.1f}",
+            f"{ev['touch_threshold']:.1f}",
+            f"{ev['dist'] / ev['touch_threshold']:.4f}",
+        ])
 
 # ============================== MAIN ==============================
 
 def run(source, out_video=None, preview=True, output_dir=None, weights_path=None):
-    global CSV_LOG
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        CSV_LOG = os.path.join(output_dir, "touch_events.csv")
+        csv_log = os.path.join(output_dir, "touch_events.csv")
         if out_video is None:
             out_video = os.path.join(output_dir, "video_detected.mp4")
         preview = False
+    else:
+        csv_log = CSV_LOG
     if weights_path is None:
         weights_path = WEIGHTS
 
@@ -395,38 +421,37 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
         yolo_half = False
 
     print("=" * 64)
-    print("  HARP TOUCH DETECTOR  v5")
-    print("  Orientation-Agnostic | Closest-String-Per-Finger")
+    print("  HARP TOUCH DETECTOR  v6")
+    print("  Resolution-Aware | Closest-String-Per-Finger")
     print("=" * 64)
     print(f"  Weights    : {weights_path}  imgsz={IMGSZ}  conf>={CONF}")
     print(f"  Device     : {yolo_device}  half={yolo_half}  frame_skip={FRAME_SKIP}")
-    print(f"  Touch dist : {TOUCH_DIST_PX}px  consec={TOUCH_CONSEC}")
+    print(f"  Touch dist : adaptive ({TOUCH_DIST_RATIO:.4f} of short edge)  consec={TOUCH_CONSEC}")
     print(f"  Fingers    : {list(FINGER_TIPS.values())}")
     print()
 
     yolo = YOLO(weights_path)
     names = yolo.names
     print(f"  Classes ({len(names)}): {names}")
+    if len(names) != NUM_STRINGS:
+        raise RuntimeError(
+            f"Hand weights must expose {NUM_STRINGS} string classes; found {len(names)}."
+        )
 
     if MP_NEW_API:
         # MediaPipe Tasks API — use only backend/hand_landmarker.task (no paths outside backend)
-        import urllib.request
         _backend_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(_backend_dir, "hand_landmarker.task")
         if not os.path.exists(model_path):
-            try:
-                model_url = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
-                print("Downloading hand landmarker model to backend/...")
-                urllib.request.urlretrieve(model_url, model_path)
-                print("Downloaded to", model_path)
-            except Exception as e:
-                raise RuntimeError(
-                    "Put hand_landmarker.task in backend/ or allow download: " + str(e)
-                ) from e
+            raise RuntimeError(
+                "MediaPipe hand_landmarker.task is missing from the backend directory. "
+                "Install the reviewed model asset before starting analysis."
+            )
         model_path = os.path.abspath(model_path)
         base_options = python.BaseOptions(model_asset_path=model_path)
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
+            running_mode=vision.RunningMode.VIDEO,
             num_hands=2,
             min_hand_detection_confidence=0.45,
             min_hand_presence_confidence=0.40,
@@ -451,7 +476,15 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
     W     = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     H     = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    touch_dist_px = adaptive_touch_distance_px(
+        W,
+        H,
+        ratio=TOUCH_DIST_RATIO,
+        minimum_px=TOUCH_DIST_MIN_PX,
+        maximum_px=TOUCH_DIST_MAX_PX,
+    )
     print(f"  Video      : {W}x{H} @ {fps:.1f} fps, {total} frames")
+    print(f"  Touch dist : {touch_dist_px:.1f}px for this video")
 
     if out_video is None:
         stem = (os.path.splitext(os.path.basename(source))[0]
@@ -460,6 +493,9 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
     os.makedirs(os.path.dirname(out_video) or ".", exist_ok=True)
     writer = cv2.VideoWriter(out_video,
                               cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Cannot create output video: {out_video}")
     print(f"  Output     : {out_video}\n")
 
     smodel      = StringModel()
@@ -474,7 +510,7 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
             if not ret:
                 break
             fidx += 1
-            tnow = fidx / fps
+            tnow = (fidx - 1) / fps
             ts = f"{int(tnow//60):02d}:{tnow%60:05.2f}"
 
             run_yolo = (FRAME_SKIP <= 1 or (fidx - 1) % FRAME_SKIP == 0) or not last_boxes
@@ -496,7 +532,10 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             if MP_NEW_API:
                 mp_image = MPImage(image_format=ImageFormat.SRGB, data=rgb)
-                detection_result = hand_landmarker.detect(mp_image)
+                detection_result = hand_landmarker.detect_for_video(
+                    mp_image,
+                    int(round(tnow * 1000)),
+                )
                 all_pts = []
                 if detection_result.hand_landmarks:
                     for hlm in detection_result.hand_landmarks:
@@ -515,30 +554,27 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
             fingertips = []
             for hi, pts in enumerate(all_pts):
                 for lm_idx, fname in FINGER_TIPS.items():
-                    fingertips.append((lm_idx, fname, pts[lm_idx][0],
+                    fingertips.append((hi, lm_idx, fname, pts[lm_idx][0],
                                       pts[lm_idx][1]))
 
             # 4) Touch detection — closest string per fingertip
-            raw = detect_touches(fingertips, smodel, boxes, TOUCH_DIST_PX)
+            raw = detect_touches(fingertips, smodel, boxes, touch_dist_px)
 
             confirmed = []
             touched_ids = set()
             contacts = []
             frame_keys = set()
 
-            for fn, li, sid, sn, dist, sx, sy in raw:
-                key = (li, sid)
+            for hand_index, fn, li, sid, sn, dist, sx, sy in raw:
+                key = (hand_index, li, sid)
                 frame_keys.add(key)
                 contact_ctr[key] += 1
                 if contact_ctr[key] >= TOUCH_CONSEC:
-                    confirmed.append((fn, li, sid, sn, dist, sx, sy))
+                    confirmed.append((hand_index, fn, li, sid, sn, dist, sx, sy))
                     touched_ids.add(sid)
-                    for _, _, px, py in fingertips:
-                        # find matching fingertip
-                        pass
                     # use the fingertip that triggered this
-                    for _li, _fn, _px, _py in fingertips:
-                        if _li == li:
+                    for _hand_index, _li, _fn, _px, _py in fingertips:
+                        if _hand_index == hand_index and _li == li:
                             contacts.append((_px, _py, sx, sy, sid))
                             break
 
@@ -559,19 +595,30 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
             writer.write(frame)
             if preview:
                 disp = cv2.resize(frame, (W//2, H//2))
-                cv2.imshow("Harp Touch v5 (Q to quit)", disp)
+                cv2.imshow("Harp Touch v6 (Q to quit)", disp)
                 if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
                     print("\nStopped.")
                     break
 
             if run_yolo:
-                for fn, li, sid, sn, dist, sx, sy in confirmed:
-                    log_touch(dict(ts=ts, frame=fidx, finger=fn,
-                                   string=sn, sid=sid, dist=dist), CSV_LOG)
+                for hand_index, fn, li, sid, sn, dist, sx, sy in confirmed:
+                    log_touch(
+                        dict(
+                            ts=ts,
+                            frame=fidx,
+                            hand=hand_index + 1,
+                            finger=fn,
+                            string=sn,
+                            sid=sid,
+                            dist=dist,
+                            touch_threshold=touch_dist_px,
+                        ),
+                        csv_log,
+                    )
 
             if fidx % 50 == 0:
                 pct = 100*fidx/total if total else 0
-                ut = set((sn, fn) for fn, _, _, sn, *_ in confirmed)
+                ut = set((sn, fn) for _, fn, _, _, sn, *_ in confirmed)
                 ts2 = ", ".join(f"{s}({f})" for s, f in ut) if ut else "-"
                 print(f"  [{ts}] {pct:5.1f}%  {fps_p:.1f}fps  "
                       f"model={'OK' if smodel.ready else 'learn'}  "
@@ -590,13 +637,13 @@ def run(source, out_video=None, preview=True, output_dir=None, weights_path=None
         el = time.time() - t0
         print(f"\nDone! {fidx} frames in {el:.1f}s ({fidx/el:.1f} fps)")
         print(f"Video : {out_video}")
-        print(f"CSV   : {CSV_LOG}")
+        print(f"CSV   : {csv_log}")
 
-    return (CSV_LOG, out_video)
+    return (csv_log, out_video)
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Harp Touch Detector v5")
+    ap = argparse.ArgumentParser(description="Harp Touch Detector v6")
     ap.add_argument("source", nargs="?", default="sample.mp4")
     ap.add_argument("--out", "-o")
     ap.add_argument("--no-preview", action="store_true")

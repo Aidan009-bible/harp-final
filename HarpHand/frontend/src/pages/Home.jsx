@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import './Home.css';
+import harpImage from '../assets/myanmar_harp.jpg';
 
 export default function Home() {
   return (
@@ -13,10 +14,10 @@ export default function Home() {
           <nav className="vintage-nav">
             <Link to="/">HOME</Link>
             <a href="#benefits">BENEFITS</a>
-            <a href="#video">VIDEO</a>
+            <a href="#workflow">WORKFLOW</a>
             <a href="#contact">CONTACT</a>
           </nav>
-          <Link to="/login" className="vintage-btn vintage-btn-cta">GET STARTED</Link>
+          <Link to="/tool" className="vintage-btn vintage-btn-cta">OPEN STUDIO</Link>
         </div>
       </header>
 
@@ -24,18 +25,20 @@ export default function Home() {
         <section className="vintage-hero">
           <div className="vintage-hero-banner">
             <div className="vintage-hero-content">
+              <p className="vintage-hero-kicker">Research prototype · Myanmar saung</p>
               <h1 className="vintage-hero-title">Harp String Detection</h1>
               <p className="vintage-hero-desc">
-                Capture which strings are plucked in your harp performance. Use audio detection, hand tracking, or both together—then export your note sheet or analysis.
+                Turn a recorded performance into a reviewable timeline of likely string plucks. Compare audio and hand signals, inspect every event, and export the evidence.
               </p>
               <div className="vintage-hero-actions">
-                <Link to="/login" className="vintage-btn vintage-btn-primary">GET STARTED</Link>
-                <a href="#video" className="vintage-btn vintage-btn-secondary">WATCH THE VIDEO</a>
+                <Link to="/tool" className="vintage-btn vintage-btn-primary">ANALYZE A PERFORMANCE</Link>
+                <a href="#workflow" className="vintage-btn vintage-btn-secondary">SEE THE WORKFLOW</a>
               </div>
             </div>
-            <div className="vintage-hero-badge">
-              <span className="vintage-badge-text">MYANMAR HARP</span>
-            </div>
+            <figure className="vintage-hero-media">
+              <img src={harpImage} alt="Traditional Myanmar harp used for the detection project" />
+              <figcaption>Audio model · string detector · hand landmarks</figcaption>
+            </figure>
             <div className="vintage-chains" aria-hidden />
           </div>
         </section>
@@ -58,14 +61,14 @@ export default function Home() {
                 <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 24h32M24 8v32M16 16l16 16M32 16L16 32" /></svg>
               </div>
               <h3>Audio + Hand</h3>
-              <p>Combine onset detection with hand-tracking for higher accuracy and teaching insights.</p>
+              <p>Compare two independent signals and see where their string labels agree or diverge.</p>
             </div>
             <div className="vintage-benefit-card">
               <div className="vintage-benefit-icon" aria-hidden>
                 <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="24" cy="24" r="18" /><path d="M24 14v10l6 6" /></svg>
               </div>
-              <h3>Precise</h3>
-              <p>Frame-accurate timing and per-string statistics for practice and analysis.</p>
+              <h3>Reviewable</h3>
+              <p>Jump from each detected event to its video moment and inspect the evidence yourself.</p>
             </div>
             <div className="vintage-benefit-card">
               <div className="vintage-benefit-icon" aria-hidden>
@@ -78,20 +81,28 @@ export default function Home() {
           <div className="vintage-gears vintage-gears-bottom" aria-hidden />
         </section>
 
-        <section id="video" className="vintage-video">
-          <h2 className="vintage-section-title">See it in action</h2>
-          <p className="vintage-section-subtitle">Upload a harp performance video to run detection.</p>
-          <Link to="/login" className="vintage-btn vintage-btn-primary">Try the tool</Link>
+        <section id="workflow" className="vintage-video vintage-workflow">
+          <div>
+            <p className="vintage-section-kicker">A clear research workflow</p>
+            <h2 className="vintage-section-title">From performance to evidence</h2>
+            <p className="vintage-section-subtitle">The system keeps the original video, detected events, signal agreement, and exports connected in one review flow.</p>
+          </div>
+          <ol className="workflow-preview">
+            <li><span>01</span><strong>Record</strong><p>Keep the strings, both hands, and audio clear.</p></li>
+            <li><span>02</span><strong>Analyze</strong><p>Run audio, hand tracking, or both together.</p></li>
+            <li><span>03</span><strong>Review</strong><p>Inspect the timeline before exporting or reporting results.</p></li>
+          </ol>
+          <Link to="/tool" className="vintage-btn vintage-btn-primary">Open the analysis studio</Link>
         </section>
 
         <section id="contact" className="vintage-contact">
           <h2 className="vintage-section-title">Contact</h2>
-          <p className="vintage-section-subtitle">NAT SHIN NAUNG — Harp string detection for teaching and performance.</p>
+          <p className="vintage-section-subtitle">NAT SHIN NAUNG — a research and teaching prototype for Myanmar harp performance analysis.</p>
         </section>
       </main>
 
       <footer className="vintage-footer">
-        <p>NAT SHIN NAUNG · Harp String Detection · Audio · Hand · Both</p>
+        <p>NAT SHIN NAUNG · Myanmar harp research · Audio · Hand · Review</p>
       </footer>
     </div>
   );

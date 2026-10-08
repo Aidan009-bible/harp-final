@@ -136,6 +136,10 @@
 
 .vintage-hero-banner {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(240px, 0.75fr);
+  align-items: stretch;
+  gap: 2rem;
   background: linear-gradient(145deg, var(--brown) 0%, var(--brown-dark) 100%);
   border: 3px solid var(--gold);
   border-radius: var(--radius);
@@ -158,11 +162,24 @@
 .vintage-hero-content {
   position: relative;
   z-index: 1;
+  align-self: center;
+}
+
+.vintage-hero-kicker,
+.vintage-section-kicker {
+  margin: 0 0 0.65rem;
+  color: var(--gold-light);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 .vintage-hero-title {
   font-family: 'Cinzel Decorative', 'Cinzel', Georgia, serif;
-  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  line-height: 1.05;
   color: var(--gold-light);
   margin: 0 0 1rem;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
@@ -174,6 +191,44 @@
   line-height: 1.6;
   margin: 0 0 1.5rem;
   max-width: 560px;
+}
+
+.vintage-hero-media {
+  position: relative;
+  z-index: 1;
+  min-height: 360px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(196, 165, 116, 0.55);
+  border-radius: 8px;
+  background: var(--brown-dark);
+}
+
+.vintage-hero-media::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 48%, rgba(26, 17, 8, 0.82));
+}
+
+.vintage-hero-media img {
+  width: 100%;
+  height: 100%;
+  min-height: 360px;
+  object-fit: cover;
+  filter: sepia(0.18) saturate(0.86) contrast(1.05);
+}
+
+.vintage-hero-media figcaption {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  left: 1rem;
+  z-index: 1;
+  color: var(--cream-text);
+  font-size: 0.65rem;
+  line-height: 1.5;
+  letter-spacing: 0.04em;
 }
 
 .vintage-hero-actions {
@@ -320,6 +375,57 @@
   margin-bottom: 2rem;
 }
 
+.vintage-workflow {
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  border: 1px solid rgba(184, 134, 11, 0.35);
+  border-radius: var(--radius);
+  background: rgba(255, 253, 248, 0.72);
+  box-shadow: var(--shadow-sm);
+}
+
+.vintage-workflow .vintage-section-kicker {
+  color: var(--gold);
+}
+
+.workflow-preview {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+}
+
+.workflow-preview li {
+  padding: 1rem;
+  border-top: 2px solid var(--gold);
+  background: rgba(245, 240, 225, 0.8);
+}
+
+.workflow-preview span,
+.workflow-preview strong {
+  display: block;
+}
+
+.workflow-preview span {
+  color: var(--gold);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+}
+
+.workflow-preview strong {
+  margin-top: 0.6rem;
+  color: var(--brown-dark);
+  font-family: 'Cinzel', Georgia, serif;
+}
+
+.workflow-preview p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
 .vintage-footer {
   text-align: center;
   padding: 1.5rem;
@@ -350,12 +456,20 @@
     gap: 1rem;
   }
 
-  .vintage-hero-badge {
-    position: static;
-    margin-top: 1rem;
+  .vintage-hero-banner {
+    grid-template-columns: 1fr;
+    padding: 1.5rem 1.25rem;
   }
 
-  .vintage-hero-banner {
-    padding: 1.5rem 1.25rem;
+  .vintage-hero-media {
+    min-height: 280px;
+  }
+
+  .vintage-hero-media img {
+    min-height: 280px;
+  }
+
+  .workflow-preview {
+    grid-template-columns: 1fr;
   }
 }
