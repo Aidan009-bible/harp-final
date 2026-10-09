@@ -1,109 +1,202 @@
-import { Link } from 'react-router-dom';
-import './Home.css';
-import harpImage from '../assets/myanmar_harp.jpg';
+import { useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import './Home.css'
+import harpHero from '../assets/harp_2.jpg'
+import harpDetail from '../assets/harp_3.jpg'
+import BrandLogo from '../components/BrandLogo.jsx'
+import ThemeToggle from '../components/ThemeToggle.jsx'
+
+const SIGNAL_LEVELS = [42, 70, 36, 84, 54, 92, 47, 76, 58, 88, 40, 68, 50, 80, 62, 44]
+
+const CAPABILITIES = [
+  {
+    number: '01',
+    title: 'Hear the attack',
+    label: 'Audio inference',
+    description: 'Find onset moments, score all sixteen strings, and retain the confidence evidence behind each prediction.',
+  },
+  {
+    number: '02',
+    title: 'Follow the gesture',
+    label: 'Hand geometry',
+    description: 'Track fingertips against the instrument’s detected strings with resolution-aware proximity measurements.',
+  },
+  {
+    number: '03',
+    title: 'Question the result',
+    label: 'Synced review',
+    description: 'Compare both signals on one timeline, inspect disagreements, and export the underlying events.',
+  },
+]
 
 export default function Home() {
-  return (
-    <div className="vintage-page">
-      <div className="vintage-rivets vintage-rivets-left" aria-hidden />
-      <div className="vintage-rivets vintage-rivets-right" aria-hidden />
+  useEffect(() => {
+    const elements = document.querySelectorAll('[data-reveal]')
+    if (!('IntersectionObserver' in window)) {
+      elements.forEach((element) => element.classList.add('is-visible'))
+      return undefined
+    }
 
-      <header className="vintage-header">
-        <div className="vintage-header-inner">
-          <Link to="/" className="vintage-logo">NAT SHIN NAUNG</Link>
-          <nav className="vintage-nav">
-            <Link to="/">HOME</Link>
-            <a href="#benefits">BENEFITS</a>
-            <a href="#workflow">WORKFLOW</a>
-            <a href="#contact">CONTACT</a>
-          </nav>
-          <Link to="/tool" className="vintage-btn vintage-btn-cta">OPEN STUDIO</Link>
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return
+          entry.target.classList.add('is-visible')
+          observer.unobserve(entry.target)
+        })
+      },
+      { threshold: 0.14 },
+    )
+
+    elements.forEach((element) => observer.observe(element))
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    <div className="home-page">
+      <a className="skip-link" href="#main-content">Skip to content</a>
+      <div className="home-aurora home-aurora-one" aria-hidden="true" />
+      <div className="home-aurora home-aurora-two" aria-hidden="true" />
+
+      <header className="home-header" data-reveal>
+        <Link to="/" className="home-brand" aria-label="Nat Shin Naung home">
+          <BrandLogo />
+          <span>
+            <strong>Nat Shin Naung</strong>
+            <small>Saung intelligence project</small>
+          </span>
+        </Link>
+        <nav className="home-nav" aria-label="Primary navigation">
+          <a href="#capabilities">System</a>
+          <a href="#workflow">Workflow</a>
+          <a href="#research">Research</a>
+        </nav>
+        <div className="home-header-actions">
+          <ThemeToggle />
+          <Link to="/tool" className="home-nav-cta">Enter studio <span aria-hidden="true">↗</span></Link>
         </div>
       </header>
 
-      <main className="vintage-main">
-        <section className="vintage-hero">
-          <div className="vintage-hero-banner">
-            <div className="vintage-hero-content">
-              <p className="vintage-hero-kicker">Research prototype · Myanmar saung</p>
-              <h1 className="vintage-hero-title">Harp String Detection</h1>
-              <p className="vintage-hero-desc">
-                Turn a recorded performance into a reviewable timeline of likely string plucks. Compare audio and hand signals, inspect every event, and export the evidence.
-              </p>
-              <div className="vintage-hero-actions">
-                <Link to="/tool" className="vintage-btn vintage-btn-primary">ANALYZE A PERFORMANCE</Link>
-                <a href="#workflow" className="vintage-btn vintage-btn-secondary">SEE THE WORKFLOW</a>
-              </div>
+      <main id="main-content">
+        <section className="home-hero" aria-labelledby="home-title">
+          <div className="home-hero-copy" data-reveal>
+            <p className="home-kicker"><span aria-hidden="true" /> Myanmar harp · multimodal detection</p>
+            <h1 id="home-title">Hear every string.<br /><em>See every gesture.</em></h1>
+            <p className="home-lede">
+              A research studio that turns recorded saung performances into inspectable string events—combining audio inference, hand tracking, and an evidence-first review timeline.
+            </p>
+            <div className="home-hero-actions">
+              <Link to="/tool" className="action-primary">Analyze a performance <span aria-hidden="true">↗</span></Link>
+              <a href="#workflow" className="action-secondary">Explore the method</a>
             </div>
-            <figure className="vintage-hero-media">
-              <img src={harpImage} alt="Traditional Myanmar harp used for the detection project" />
-              <figcaption>Audio model · string detector · hand landmarks</figcaption>
+            <dl className="home-proof" aria-label="Project facts">
+              <div><dt>16</dt><dd>strings modeled</dd></div>
+              <div><dt>03</dt><dd>analysis modes</dd></div>
+              <div><dt>01</dt><dd>review timeline</dd></div>
+            </dl>
+          </div>
+
+          <div className="instrument-stage" data-reveal>
+            <figure className="instrument-frame">
+              <img src={harpHero} alt="Traditional Myanmar saung harp viewed from the side" />
+              <figcaption>Traditional form · computational reading</figcaption>
             </figure>
-            <div className="vintage-chains" aria-hidden />
+            <div className="stage-status" aria-hidden="true">
+              <span className="status-beacon" />
+              <div><small>Pipeline</small><strong>Audio + hand aligned</strong></div>
+            </div>
+            <div className="stage-event" aria-hidden="true">
+              <span>Event 024</span>
+              <strong>S07</strong>
+              <small>00:12.48 · 91%</small>
+            </div>
           </div>
         </section>
 
-        <section id="benefits" className="vintage-benefits">
-          <h2 className="vintage-section-title">Benefits</h2>
-          <p className="vintage-section-subtitle">
-            This tool helps musicians and teachers visualize and document harp string plucks from video—with optional hand and audio analysis.
-          </p>
-          <div className="vintage-benefits-grid">
-            <div className="vintage-benefit-card">
-              <div className="vintage-benefit-icon" aria-hidden>
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M24 8v8l6 6M18 14l6 6 12-12M12 28l6 6 12-12" /></svg>
-              </div>
-              <h3>Easy to use</h3>
-              <p>Upload a video, choose audio and/or hand detection, and get timestamps and note sheets.</p>
+        <section className="signal-deck" aria-labelledby="signal-title" data-reveal>
+          <div className="signal-deck-heading">
+            <div>
+              <p className="section-label">Live system language</p>
+              <h2 id="signal-title">Sixteen strings. One readable signal.</h2>
             </div>
-            <div className="vintage-benefit-card">
-              <div className="vintage-benefit-icon" aria-hidden>
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 24h32M24 8v32M16 16l16 16M32 16L16 32" /></svg>
-              </div>
-              <h3>Audio + Hand</h3>
-              <p>Compare two independent signals and see where their string labels agree or diverge.</p>
-            </div>
-            <div className="vintage-benefit-card">
-              <div className="vintage-benefit-icon" aria-hidden>
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="24" cy="24" r="18" /><path d="M24 14v10l6 6" /></svg>
-              </div>
-              <h3>Reviewable</h3>
-              <p>Jump from each detected event to its video moment and inspect the evidence yourself.</p>
-            </div>
-            <div className="vintage-benefit-card">
-              <div className="vintage-benefit-icon" aria-hidden>
-                <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 12h24v24H12z" /><path d="M18 24l6 6 12-12" /></svg>
-              </div>
-              <h3>Export</h3>
-              <p>Download CSV logs, annotated video, and PDF note sheets for your records.</p>
-            </div>
+            <p>Each event keeps its time, label, source, and score. The interface shows evidence—not a magic accuracy number.</p>
           </div>
-          <div className="vintage-gears vintage-gears-bottom" aria-hidden />
+          <div className="signal-strings" aria-label="Decorative sixteen-string signal visualization">
+            {SIGNAL_LEVELS.map((level, index) => (
+              <div
+                className="signal-string"
+                key={index}
+                style={{ '--signal-level': `${level}%`, '--signal-delay': `${index * 70}ms` }}
+              >
+                <span className="signal-string-track"><i /></span>
+                <small>{String(index + 1).padStart(2, '0')}</small>
+              </div>
+            ))}
+          </div>
         </section>
 
-        <section id="workflow" className="vintage-video vintage-workflow">
+        <section id="capabilities" className="capability-section">
+          <div className="section-heading" data-reveal>
+            <p className="section-label">What the system does</p>
+            <h2>A performance becomes<br /><em>reviewable evidence.</em></h2>
+          </div>
+          <div className="capability-grid">
+            {CAPABILITIES.map((item, index) => (
+              <article className="capability-card" data-reveal key={item.number} style={{ '--card-delay': `${index * 90}ms` }}>
+                <div className="capability-card-top"><span>{item.number}</span><small>{item.label}</small></div>
+                <h3>{item.title}</h3>
+                <p>{item.description}</p>
+                <div className="capability-rule" aria-hidden="true"><span /></div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section id="workflow" className="workflow-story" data-reveal>
+          <figure className="workflow-image">
+            <img src={harpDetail} alt="Gold and red Myanmar harp on a dark blue background" />
+            <figcaption>Saung · form, motion, resonance</figcaption>
+          </figure>
+          <div className="workflow-copy">
+            <p className="section-label">The review loop</p>
+            <h2>Record once.<br /><em>Inspect every layer.</em></h2>
+            <ol>
+              <li><span>01</span><div><strong>Frame the performance</strong><p>Keep the full string field and both hands visible with clean, unclipped audio.</p></div></li>
+              <li><span>02</span><div><strong>Run the signals</strong><p>Choose audio, hand tracking, or the combined comparison workflow.</p></div></li>
+              <li><span>03</span><div><strong>Challenge the output</strong><p>Seek to each event, inspect agreement, and export logs, video, notes, and the inference manifest.</p></div></li>
+            </ol>
+            <Link to="/tool" className="text-link">Open the analysis workspace <span aria-hidden="true">→</span></Link>
+          </div>
+        </section>
+
+        <section id="research" className="research-section" data-reveal>
           <div>
-            <p className="vintage-section-kicker">A clear research workflow</p>
-            <h2 className="vintage-section-title">From performance to evidence</h2>
-            <p className="vintage-section-subtitle">The system keeps the original video, detected events, signal agreement, and exports connected in one review flow.</p>
+            <p className="section-label">Research posture</p>
+            <h2>Built to show its work.</h2>
           </div>
-          <ol className="workflow-preview">
-            <li><span>01</span><strong>Record</strong><p>Keep the strings, both hands, and audio clear.</p></li>
-            <li><span>02</span><strong>Analyze</strong><p>Run audio, hand tracking, or both together.</p></li>
-            <li><span>03</span><strong>Review</strong><p>Inspect the timeline before exporting or reporting results.</p></li>
-          </ol>
-          <Link to="/tool" className="vintage-btn vintage-btn-primary">Open the analysis studio</Link>
+          <p>
+            HarpHand is a research and teaching prototype. Signal agreement is diagnostic evidence, not ground-truth accuracy. Model checksums, thresholds, timing, and event-level exports keep each run traceable.
+          </p>
+          <div className="research-tags" aria-label="Research qualities">
+            <span>Inspectable</span><span>Reproducible</span><span>Exportable</span>
+          </div>
         </section>
 
-        <section id="contact" className="vintage-contact">
-          <h2 className="vintage-section-title">Contact</h2>
-          <p className="vintage-section-subtitle">NAT SHIN NAUNG — a research and teaching prototype for Myanmar harp performance analysis.</p>
+        <section className="home-cta" data-reveal>
+          <p className="section-label">The studio is ready</p>
+          <h2>Bring one clear performance.<br /><em>Leave with a timeline.</em></h2>
+          <Link to="/tool" className="action-primary">Begin analysis <span aria-hidden="true">↗</span></Link>
         </section>
       </main>
 
-      <footer className="vintage-footer">
-        <p>NAT SHIN NAUNG · Myanmar harp research · Audio · Hand · Review</p>
+      <footer className="home-footer">
+        <Link to="/" className="home-brand">
+          <BrandLogo />
+          <span><strong>Nat Shin Naung</strong><small>Myanmar harp research</small></span>
+        </Link>
+        <p>Audio · Hand · Evidence</p>
+        <p>Research prototype</p>
       </footer>
     </div>
-  );
+  )
 }

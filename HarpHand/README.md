@@ -144,6 +144,8 @@ The agreement percentage shown by the interface measures how often audio and han
 
 The staged, source-backed improvement plan is documented in [the research roadmap](docs/research-roadmap.md).
 
+The frontend's cultural references, motion rules, accessibility constraints, and visual-system decisions are documented in [the UI design research note](docs/ui-design-research.md).
+
 ---
 
 ## ✅ Quality checks

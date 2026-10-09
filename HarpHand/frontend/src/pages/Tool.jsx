@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import '../App.css'
 import harpImage from '../assets/myanmar_harp.jpg'
+import BrandLogo from '../components/BrandLogo.jsx'
+import ThemeToggle from '../components/ThemeToggle.jsx'
 import {
   NOTE_COLUMNS,
   STRING_TO_NOTE,
@@ -18,18 +20,21 @@ const API = import.meta.env.VITE_API_URL || '/api'
 
 const DETECTION_METHODS = [
   {
+    index: '01',
     value: 'audio',
     label: 'Audio',
     eyebrow: 'Fastest',
     description: 'Detect plucks from the soundtrack using the trained 16-string model.',
   },
   {
+    index: '02',
     value: 'hand',
     label: 'Hand tracking',
     eyebrow: 'Visual',
     description: 'Track fingertips and their proximity to detected harp strings.',
   },
   {
+    index: '03',
     value: 'both',
     label: 'Audio + hand',
     eyebrow: 'Recommended',
@@ -37,22 +42,59 @@ const DETECTION_METHODS = [
   },
 ]
 
+const TOOL_SIGNAL_LEVELS = [32, 72, 46, 88, 55, 78, 38, 92, 62, 84, 48, 75, 42, 67, 52, 36]
+
+const DEMO_STATUS = {
+  status: 'done',
+  progress: 100,
+  message: 'Demo analysis complete.',
+  audio: { rows: 11 },
+  hand: { rows: 11 },
+  combined: { video_path: 'demo-preview' },
+}
+
+const DEMO_EVENTS = [
+  { entry_number: '0001', time: 1.24, type: 'audio', string: 'S4', confidence: 0.94, method: 'model' },
+  { entry_number: '0002', time: 1.24, type: 'hand', string: 'S4', confidence: 0.91, finger: 'index', distance: 5.8, status: 'touch' },
+  { entry_number: '0003', time: 2.86, type: 'audio', string: 'S7', confidence: 0.89, method: 'model' },
+  { entry_number: '0004', time: 2.86, type: 'hand', string: 'S7', confidence: 0.87, finger: 'thumb', distance: 6.1, status: 'touch' },
+  { entry_number: '0005', time: 4.11, type: 'audio', string: 'S9', confidence: 0.82, method: 'hybrid' },
+  { entry_number: '0006', time: 4.11, type: 'hand', string: 'S8', confidence: 0.78, finger: 'index', distance: 8.4, status: 'near' },
+  { entry_number: '0007', time: 5.78, type: 'audio', string: 'S5', confidence: 0.93, method: 'model' },
+  { entry_number: '0008', time: 5.78, type: 'audio', string: 'S8', confidence: 0.88, method: 'model' },
+  { entry_number: '0009', time: 5.78, type: 'hand', string: 'S5', confidence: 0.90, finger: 'thumb', distance: 5.4, status: 'touch' },
+  { entry_number: '0010', time: 5.78, type: 'hand', string: 'S8', confidence: 0.86, finger: 'index', distance: 6.3, status: 'touch' },
+  { entry_number: '0011', time: 7.42, type: 'audio', string: 'S11', confidence: 0.91, method: 'model' },
+  { entry_number: '0012', time: 7.42, type: 'hand', string: 'S11', confidence: 0.88, finger: 'middle', distance: 5.9, status: 'touch' },
+  { entry_number: '0013', time: 9.06, type: 'audio', string: 'S6', confidence: 0.86, method: 'hybrid' },
+  { entry_number: '0014', time: 9.06, type: 'hand', string: 'S6', confidence: 0.83, finger: 'index', distance: 7.0, status: 'touch' },
+  { entry_number: '0015', time: 10.64, type: 'audio', string: 'S3', confidence: 0.95, method: 'model' },
+  { entry_number: '0016', time: 10.64, type: 'hand', string: 'S3', confidence: 0.93, finger: 'thumb', distance: 4.7, status: 'touch' },
+  { entry_number: '0017', time: 12.18, type: 'audio', string: 'S10', confidence: 0.84, method: 'hybrid' },
+  { entry_number: '0018', time: 12.18, type: 'hand', string: 'S12', confidence: 0.76, finger: 'ring', distance: 9.2, status: 'near' },
+  { entry_number: '0019', time: 14.02, type: 'audio', string: 'S8', confidence: 0.92, method: 'model' },
+  { entry_number: '0020', time: 14.02, type: 'hand', string: 'S8', confidence: 0.89, finger: 'index', distance: 5.6, status: 'touch' },
+  { entry_number: '0021', time: 15.67, type: 'audio', string: 'S4', confidence: 0.90, method: 'model' },
+  { entry_number: '0022', time: 15.67, type: 'hand', string: 'S4', confidence: 0.86, finger: 'thumb', distance: 6.5, status: 'touch' },
+]
+
 export default function App() {
+  const demoResults = new URLSearchParams(window.location.search).get('demo') === 'results'
   const [modelFile, setModelFile] = useState(null)
   const [videoFile, setVideoFile] = useState(null)
-  const [jobId, setJobId] = useState(null)
-  const [status, setStatus] = useState(null)
+  const [jobId, setJobId] = useState(() => demoResults ? 'demo-result' : null)
+  const [status, setStatus] = useState(() => demoResults ? DEMO_STATUS : null)
   const [error, setError] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [method, setMethod] = useState('both')  // 'audio' | 'hand' | 'both'
   const [mode, setMode] = useState('hybrid')   // 'default' | 'hybrid' (audio only)
   const [weightsFile, setWeightsFile] = useState(null)
-  const [logs, setLogs] = useState([])
+  const [logs, setLogs] = useState(() => demoResults ? DEMO_EVENTS : [])
   const [videoUrl, setVideoUrl] = useState(null)
-  const [currentTime, setCurrentTime] = useState(0)
+  const [currentTime, setCurrentTime] = useState(() => demoResults ? 5.78 : 0)
   const [logViewMode, setLogViewMode] = useState('list')  // 'list' | 'grid'
   const [noteFormat, setNoteFormat] = useState('number')  // 'number' | 'note'
-  const [videoDuration, setVideoDuration] = useState(0)
+  const [videoDuration, setVideoDuration] = useState(() => demoResults ? 18 : 0)
   const [useDefaultModel, setUseDefaultModel] = useState(false)
   const [useDefaultWeights, setUseDefaultWeights] = useState(true)
   const [defaultsAvailable, setDefaultsAvailable] = useState({
@@ -111,10 +153,6 @@ export default function App() {
     activeJobRef.current = null
   }, [])
 
-  const visibleLogs = useMemo(
-    () => logs.filter((event) => Math.abs((event.time || 0) - currentTime) <= 0.25),
-    [logs, currentTime],
-  )
   const gridRows = useMemo(() => buildGridRows(logs, currentTime), [logs, currentTime])
   const perStringStats = useMemo(() => buildPerStringStats(gridRows), [gridRows])
   const agreementMatrix = useMemo(() => buildAgreementMatrix(gridRows), [gridRows])
@@ -391,10 +429,9 @@ export default function App() {
   }
 
   const seekToTime = (timeInSeconds) => {
-    if (videoRef.current != null && !isNaN(timeInSeconds)) {
-      videoRef.current.currentTime = timeInSeconds
-      setCurrentTime(timeInSeconds)
-    }
+    if (isNaN(timeInSeconds)) return
+    if (videoRef.current != null) videoRef.current.currentTime = timeInSeconds
+    setCurrentTime(timeInSeconds)
   }
 
   const goToNextPluck = () => {
@@ -409,6 +446,8 @@ export default function App() {
 
   const hasBothAudioHand = summary.comparableEvents > 0
   const noteRows = useMemo(() => buildNoteRows(gridRows), [gridRows])
+  const canDownloadArtifacts = Boolean(jobId && !demoResults)
+  const lastEventTime = gridRows.at(-1)?.time ?? 0
 
   // User profile from localStorage
   const userName = localStorage.getItem('user_name') || ''
@@ -430,9 +469,12 @@ export default function App() {
 
   return (
     <div className="app app-showcase">
+      <a className="skip-link" href="#analysis-workspace">Skip to analysis workspace</a>
+      <div className="tool-ambient tool-ambient-one" aria-hidden="true" />
+      <div className="tool-ambient tool-ambient-two" aria-hidden="true" />
       <header className="tool-topbar">
         <Link to="/" className="tool-brand">
-          <span className="tool-brand-mark" aria-hidden="true">NSN</span>
+          <BrandLogo />
           <span>
             <strong>Nat Shin Naung</strong>
             <small>Saung analysis studio</small>
@@ -440,6 +482,7 @@ export default function App() {
         </Link>
         <div className="tool-topbar-actions">
           <Link to="/" className="tool-back-link">Project overview</Link>
+          <ThemeToggle />
           {userName && (
             <div className="user-profile-badge" title={userName + (userEmail ? `\n${userEmail}` : '')}>
               {userAvatar ? (
@@ -454,22 +497,40 @@ export default function App() {
       </header>
 
       <section className="tool-hero" aria-labelledby="tool-title">
-        <div>
+        <div className="tool-hero-copy-block">
           <p className="tool-eyebrow">Myanmar harp · 16-string detection</p>
-          <h1 id="tool-title">Turn a performance into a reviewable string timeline.</h1>
+          <h1 id="tool-title">Performance in.<br /><em>Evidence out.</em></h1>
           <p className="tool-hero-copy">
             Upload one clear video. HarpHand finds pluck moments, labels likely strings, and creates an annotated result you can inspect, teach from, or export.
           </p>
         </div>
-        <div className="tool-hero-facts" aria-label="Analysis capabilities">
-          <span><strong>16</strong> strings</span>
-          <span><strong>3</strong> analysis modes</span>
-          <span><strong>1</strong> synced timeline</span>
+        <div className="tool-signal-visual" aria-label="Sixteen-string signal visualization">
+          <div className="tool-signal-heading"><span>Signal field</span><small>Listening / watching</small></div>
+          <div className="tool-signal-bars" aria-hidden="true">
+            {TOOL_SIGNAL_LEVELS.map((level, index) => (
+              <span key={index} style={{ '--tool-level': `${level}%`, '--tool-delay': `${index * 55}ms` }}><i /></span>
+            ))}
+          </div>
+          <div className="tool-hero-facts" aria-label="Analysis capabilities">
+            <span><strong>16</strong> strings</span>
+            <span><strong>03</strong> modes</span>
+            <span><strong>01</strong> timeline</span>
+          </div>
         </div>
       </section>
 
-      <main className="main tool-main">
-        <div className="tool-workspace">
+      <main id="analysis-workspace" className="main tool-main">
+        {demoResults && (
+          <section className="demo-results-banner" aria-label="Demo result notice">
+            <div>
+              <span className="demo-results-label">Showcase dataset</span>
+              <strong>Result interface preview</strong>
+              <p>This built-in sample demonstrates the review tools. It is not a claim about model accuracy.</p>
+            </div>
+            <Link to="/tool" className="btn ghost">Exit preview</Link>
+          </section>
+        )}
+        <div className={`tool-workspace ${demoResults ? 'tool-workspace-demo-hidden' : ''}`}>
           <section className="card upload-card workflow-card">
             <div className="workflow-card-heading">
               <div>
@@ -497,6 +558,7 @@ export default function App() {
                         checked={method === option.value}
                         onChange={() => setMethod(option.value)}
                       />
+                      <span className="method-card-index" aria-hidden="true">{option.index}</span>
                       <span className="method-card-topline">
                         <strong>{option.label}</strong>
                         <small>{option.eyebrow}</small>
@@ -530,7 +592,7 @@ export default function App() {
                     accept=".mp4,.mov,.mkv,.avi,.webm"
                     onChange={(event) => handleVideoSelection(event.target.files?.[0] ?? null)}
                   />
-                  <span className="dropzone-badge" aria-hidden="true">VIDEO</span>
+                  <span className="dropzone-badge" aria-hidden="true">MP4</span>
                   {videoFile ? (
                     <span className="dropzone-copy">
                       <strong>{videoFile.name}</strong>
@@ -665,9 +727,10 @@ export default function App() {
           </aside>
         </div>
 
-        {status && (
-          <section className="card status-card">
-            <h3>Analysis status</h3>
+        {status && status.status !== 'done' && (
+          <section className="card status-card" aria-live="polite">
+            <p className="result-kicker">Analysis status</p>
+            <h2>{status.status === 'error' ? 'The run needs attention.' : 'Reading the performance…'}</h2>
             {status.status === 'queued' && <p className="running">{status.message || 'Waiting to start analysis…'}</p>}
             {status.status === 'running' && (
               <p className="running">{status.message || 'Processing…'}</p>
@@ -687,164 +750,145 @@ export default function App() {
             {status.status === 'error' && (
               <p className="error">{status.message}</p>
             )}
-            {status.status === 'done' && (
-              <div className="done">
-                {status.audio && status.hand ? (
-                  <>
-                    <p className="success">
-                      Done. Audio: {status.audio.rows ?? 0} onset(s). Hand: {status.hand.rows ?? 0} touch(es).
-                    </p>
-                    {status.combined ? (
-                      <div className="actions" style={{ marginBottom: '0.5rem' }}>
-                        <button type="button" className="btn primary" onClick={() => downloadVideo('combined')} style={{ fontSize: '1rem', padding: '0.75rem 1.5rem' }}>
-                          Combined annotated video
-                        </button>
-                      </div>
-                    ) : status.combined_error && (
-                      <p className="error" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-                        Combined video: {status.combined_error}
-                      </p>
-                    )}
-                    <div className="actions actions-both">
-                      <button type="button" className="btn primary" onClick={() => downloadCsv('audio')}>
-                        Audio CSV
-                      </button>
-                      <button type="button" className="btn secondary" onClick={() => downloadVideo('audio')}>
-                        Audio video
-                      </button>
-                      <button type="button" className="btn primary" onClick={() => downloadCsv('hand')}>
-                        Hand CSV
-                      </button>
-                      <button type="button" className="btn secondary" onClick={() => downloadVideo('hand')}>
-                        Hand video
-                      </button>
-                    </div>
-                    <div className="actions" style={{ marginTop: '0.5rem' }}>
-                      <button type="button" className="btn primary" onClick={downloadLog}>
-                        Detection log (CSV)
-                      </button>
-                    </div>
-                  </>
-                ) : status.audio ? (
-                  <>
-                    <p className="success">
-                      Done (audio only). {status.audio.rows ?? 0} onset(s).
-                    </p>
-                    {status.hand_error && (
-                      <p className="error" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-                        Hand detection: {status.hand_error}
-                      </p>
-                    )}
-                    <div className="actions">
-                      <button type="button" className="btn primary" onClick={() => downloadCsv('audio')}>
-                        Download CSV
-                      </button>
-                      <button type="button" className="btn secondary" onClick={() => downloadVideo('audio')}>
-                        Download video
-                      </button>
-                    </div>
-                    <div className="actions" style={{ marginTop: '0.5rem' }}>
-                      <button type="button" className="btn primary" onClick={downloadLog}>
-                        Detection log (CSV)
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <p className="success">
-                      Done. Detected {status.rows ?? 0} {method === 'hand' ? 'touch event(s)' : 'onset(s)'}.
-                    </p>
-                    <div className="actions">
-                      <button type="button" className="btn primary" onClick={() => downloadCsv()}>
-                        Download CSV
-                      </button>
-                      <button type="button" className="btn secondary" onClick={() => downloadVideo()}>
-                        Download {method === 'hand' ? 'annotated' : 'labeled'} video
-                      </button>
-                    </div>
-                    <div className="actions" style={{ marginTop: '0.5rem' }}>
-                      <button type="button" className="btn primary" onClick={downloadLog}>
-                        Detection log (CSV)
-                      </button>
-                    </div>
-                  </>
-                )}
-                <div className="actions" style={{ marginTop: '0.5rem' }}>
-                  {method !== 'hand' && (
-                    <button type="button" className="btn secondary" onClick={downloadManifest}>
-                      Inference manifest
-                    </button>
-                  )}
-                  <button type="button" className="btn ghost" onClick={reset}>
-                    New run
+          </section>
+        )}
+
+        {status?.status === 'done' && (
+          <section id="analysis-results" className="card result-summary-card">
+            <div className="result-summary-head">
+              <div>
+                <p className="result-kicker">01 · Run complete</p>
+                <h2>Performance evidence is ready.</h2>
+                <p>
+                  {isCombinedResult
+                    ? 'Audio and hand signals are aligned below for review.'
+                    : `${method === 'hand' ? 'Hand tracking' : 'Audio detection'} finished and the event record is ready.`}
+                </p>
+              </div>
+              <span className="result-state"><i aria-hidden="true" />Complete</span>
+            </div>
+
+            <dl className="result-metrics">
+              <div><dt>{gridRows.length}</dt><dd>detected events</dd></div>
+              <div>
+                <dt>{isCombinedResult && summary.agreement != null ? `${summary.agreement.toFixed(0)}%` : summary.averageScore != null ? `${summary.averageScore.toFixed(0)}%` : '—'}</dt>
+                <dd>{isCombinedResult ? 'signal agreement' : 'average confidence'}</dd>
+              </div>
+              <div>
+                <dt>{isCombinedResult && summary.handCoverage != null ? `${summary.handCoverage.toFixed(0)}%` : status.audio?.rows ?? status.hand?.rows ?? status.rows ?? '—'}</dt>
+                <dd>{isCombinedResult ? 'hand coverage' : 'reported rows'}</dd>
+              </div>
+              <div><dt>{formatTime(lastEventTime)}</dt><dd>last event</dd></div>
+            </dl>
+
+            <div className="result-export-bar">
+              <div className="result-export-copy">
+                <strong>Export evidence</strong>
+                <small>{demoResults ? 'Exports that require a backend are disabled in this showcase preview.' : 'Download the artifacts needed for review or reproducibility.'}</small>
+              </div>
+              <div className="result-export-actions">
+                {status.combined && (
+                  <button type="button" className="btn primary" onClick={() => downloadVideo('combined')} disabled={!canDownloadArtifacts}>
+                    Annotated video
                   </button>
+                )}
+                {status.audio && (
+                  <button type="button" className="btn secondary" onClick={() => downloadCsv('audio')} disabled={!canDownloadArtifacts}>Audio CSV</button>
+                )}
+                {status.hand && (
+                  <button type="button" className="btn secondary" onClick={() => downloadCsv('hand')} disabled={!canDownloadArtifacts}>Hand CSV</button>
+                )}
+                <button type="button" className="btn secondary" onClick={downloadLog}>Event log</button>
+                {method !== 'hand' && (
+                  <button type="button" className="btn ghost" onClick={downloadManifest} disabled={!canDownloadArtifacts}>Manifest</button>
+                )}
+                {demoResults ? (
+                  <Link to="/tool" className="btn ghost">New analysis</Link>
+                ) : (
+                  <button type="button" className="btn ghost" onClick={reset}>New analysis</button>
+                )}
+              </div>
+            </div>
+            {status.combined_error && <p className="result-warning">Combined video could not be created: {status.combined_error}</p>}
+            {status.hand_error && <p className="result-warning">Hand detection could not be completed: {status.hand_error}</p>}
+          </section>
+        )}
+
+        {status?.status === 'done' && (videoUrl || demoResults) && (
+          <section className="card preview-card result-section-card">
+            <div className="result-section-heading">
+              <div>
+                <p className="result-kicker">02 · Media review</p>
+                <h2>Annotated performance</h2>
+                <p>Select an event marker to inspect the corresponding moment.</p>
+              </div>
+              {gridRows.length > 0 && (
+              <div className="preview-nav">
+                <button type="button" className="btn ghost" onClick={goToPrevPluck} title="Previous pluck">
+                  ← Previous
+                </button>
+                <button type="button" className="btn ghost" onClick={goToNextPluck} title="Next pluck">
+                  Next →
+                </button>
+              </div>
+              )}
+            </div>
+            <div className="video-container">
+              {demoResults && !videoUrl ? (
+                <div className="demo-video-poster">
+                  <img src={harpImage} alt="Traditional Myanmar harp used as the demo preview cover" />
+                  <div><span>Showcase preview</span><strong>Media is available after a real analysis run.</strong></div>
+                </div>
+              ) : (
+                <video
+                  ref={videoRef}
+                  controls
+                  src={videoUrl}
+                  className="preview-video"
+                  onLoadedMetadata={() => {
+                    if (videoRef.current && isFinite(videoRef.current.duration)) setVideoDuration(videoRef.current.duration)
+                  }}
+                  onTimeUpdate={() => { if (videoRef.current) setCurrentTime(videoRef.current.currentTime) }}
+                  onSeeked={() => { if (videoRef.current) setCurrentTime(videoRef.current.currentTime) }}
+                  onPlay={() => { if (videoRef.current) setCurrentTime(videoRef.current.currentTime) }}
+                >
+                  Your browser does not support the video tag.
+                </video>
+              )}
+            </div>
+            {gridRows.length > 0 && videoDuration > 0 && (
+              <div className="timeline-review">
+                <div className="timeline-meta">
+                  <span className="timeline-current">{formatTime(currentTime)}</span>
+                  <span className="timeline-legend"><i className="timeline-legend-match" />Agreement <i className="timeline-legend-review" />Review</span>
+                  <span>{formatTime(videoDuration)}</span>
+                </div>
+                <div className="timeline-strip" aria-label="Detection event timeline">
+                  <div className="timeline-playhead" style={{ left: `${(currentTime / videoDuration) * 100}%` }} />
+                  {gridRows.map((row) => (
+                    <button
+                      key={`tl-${row.time}-${row.index}`}
+                      type="button"
+                      className={`timeline-marker ${row.match ? 'timeline-marker-match' : 'timeline-marker-miss'}`}
+                      style={{ left: `${(row.time / videoDuration) * 100}%` }}
+                      onClick={() => seekToTime(row.time)}
+                      title={`${formatTime(row.time)} · ${row.match ? 'audio and hand agree' : 'review signal difference'}`}
+                    />
+                  ))}
                 </div>
               </div>
             )}
           </section>
         )}
 
-        {status?.status === 'done' && videoUrl && (
-          <section className="card preview-card">
-            <h3>Preview</h3>
-            {gridRows.length > 0 && (
-              <div className="preview-nav">
-                <button type="button" className="btn ghost" onClick={goToPrevPluck} title="Previous pluck">
-                  ← Prev pluck
-                </button>
-                <button type="button" className="btn ghost" onClick={goToNextPluck} title="Next pluck">
-                  Next pluck →
-                </button>
-              </div>
-            )}
-            <div className="video-container">
-              <video
-                ref={videoRef}
-                controls
-                src={videoUrl}
-                className="preview-video"
-                onLoadedMetadata={() => {
-                  if (videoRef.current && isFinite(videoRef.current.duration))
-                    setVideoDuration(videoRef.current.duration)
-                }}
-                onTimeUpdate={() => {
-                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
-                }}
-                onSeeked={() => {
-                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
-                }}
-                onPlay={() => {
-                  if (videoRef.current) setCurrentTime(videoRef.current.currentTime)
-                }}
-              >
-                Your browser does not support the video tag.
-              </video>
-            </div>
-            {gridRows.length > 0 && videoDuration > 0 && (
-              <div className="timeline-strip" title="Click to seek">
-                <div
-                  className="timeline-playhead"
-                  style={{ left: `${(currentTime / videoDuration) * 100}%` }}
-                />
-                {gridRows.map((row) => (
-                  <button
-                    key={`tl-${row.time}-${row.index}`}
-                    type="button"
-                    className={`timeline-marker ${row.match ? 'timeline-marker-match' : 'timeline-marker-miss'}`}
-                    style={{ left: `${(row.time / videoDuration) * 100}%` }}
-                    onClick={() => seekToTime(row.time)}
-                    title={`${formatTime(row.time)} ${row.match ? '✓' : ''}`}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
-        )}
-
         {status?.status === 'done' && logs.length > 0 && (
-          <section className="card log-card">
+          <section className="card log-card result-section-card">
             <div className="log-card-header">
-              <h3>Detection Log (synced to video · {formatTime(currentTime)})</h3>
+              <div>
+                <p className="result-kicker">03 · Event evidence</p>
+                <h2>Detection record</h2>
+                <p>Every signal observation, with its source, string label, and confidence.</p>
+              </div>
               <div className="log-view-toggle">
                 <button
                   type="button"
@@ -863,31 +907,26 @@ export default function App() {
               </div>
             </div>
             <div className="log-download-row">
-              <span className="log-summary">
-                {gridRows.length} events
-                {isCombinedResult && summary.agreement != null ? (
-                  <> · {summary.matches}/{summary.comparableEvents} matching labels · {summary.agreement.toFixed(1)}% agreement · {summary.handCoverage.toFixed(1)}% hand coverage</>
-                ) : summary.averageScore != null ? (
-                  <> · {summary.averageScore.toFixed(1)}% {method === 'hand' ? 'avg proximity score' : 'avg model confidence'}</>
-                ) : null}
-              </span>
-              <button type="button" className="btn primary" onClick={downloadLog} title="Download full detection log as CSV">
-                Download log (CSV)
+              <div className="evidence-chips" aria-label="Detection summary">
+                <span><strong>{gridRows.length}</strong> moments</span>
+                {isCombinedResult && summary.agreement != null && <span><strong>{summary.matches}/{summary.comparableEvents}</strong> aligned</span>}
+                {isCombinedResult && summary.agreement != null && <span><strong>{summary.agreement.toFixed(1)}%</strong> agreement</span>}
+                <span><strong>{formatTime(currentTime)}</strong> selected</span>
+              </div>
+              <button type="button" className="btn secondary" onClick={downloadLog} title="Download full detection log as CSV">
+                Export CSV
               </button>
             </div>
             {logViewMode === 'list' ? (
               <div ref={logPanelRef} className="log-panel">
-                {visibleLogs.length === 0 ? (
-                  <p className="muted" style={{ padding: '1rem', textAlign: 'center' }}>
-                    No events at this time. Play the video to see detections.
-                  </p>
-                ) : (
-                  visibleLogs.map((event, idx) => (
+                {logs.map((event, idx) => {
+                  const isActive = Math.abs((event.time || 0) - currentTime) <= 0.25
+                  return (
                     <div
                       key={event.entry_number || idx}
                       role="button"
                       tabIndex={0}
-                      className="log-entry log-entry-active log-entry-clickable"
+                      className={`log-entry log-entry-clickable ${isActive ? 'log-entry-active' : ''}`}
                       onClick={() => seekToTime(event.time)}
                       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); seekToTime(event.time) } }}
                       title="Click to seek video to this time"
@@ -895,17 +934,17 @@ export default function App() {
                       <span className="log-entry-number">{event.entry_number || `${(idx + 1).toString().padStart(4, '0')}`}</span>
                       <span className="log-time">{formatTime(event.time)}</span>
                       <span className={`log-type log-type-${event.type}`}>
-                        {event.type === 'audio' ? 'string' : 'hand'}
+                        {event.type === 'audio' ? 'audio' : 'hand'}
                       </span>
                       <span className="log-string">{event.string}</span>
                       {event.type === 'audio' && (
-                        <span style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span className="log-entry-detail">
                           <span className="log-method">{event.method === 'yin' || event.method === 'string*' ? 'String*' : (event.method === 'model' || event.method === 'string' ? 'String' : (event.method || 'String'))}</span>
                           <span className="log-confidence">{(event.confidence * 100).toFixed(1)}%</span>
                         </span>
                       )}
                       {event.type === 'hand' && (
-                        <span style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span className="log-entry-detail">
                           <span className="log-status">{event.status || 'detected'}</span>
                           <span className="log-finger">{event.finger || '-'}</span>
                           <span className="log-distance">{event.distance ? event.distance.toFixed(1) : '0.0'}px</span>
@@ -913,8 +952,8 @@ export default function App() {
                         </span>
                       )}
                     </div>
-                  ))
-                )}
+                  )
+                })}
               </div>
             ) : (
               <div ref={logPanelRef} className="log-panel log-grid-wrap">
@@ -959,24 +998,14 @@ export default function App() {
         )}
 
         {status?.status === 'done' && logs.length > 0 && (
-          <section className="card generated-note-card">
+          <section className="card generated-note-card result-section-card">
             <div className="generated-note-header-row">
               <div>
-                <h3 style={{ margin: 0 }}>
-                  {method === 'both' ? 'Both (Audio + Hand)' : method === 'audio' ? 'Audio Detection' : 'Hand Detection'}
-                  {' '}
-                  — Note
-                </h3>
-                <span style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>
-                  {gridRows.length} events
-                  {isCombinedResult && summary.agreement != null ? (
-                    <> · {summary.matches}/{summary.comparableEvents} matching labels · {summary.agreement.toFixed(1)}% agreement</>
-                  ) : summary.averageScore != null ? (
-                    <> · {summary.averageScore.toFixed(1)}% {method === 'hand' ? 'avg proximity score' : 'avg model confidence'}</>
-                  ) : null}
-                </span>
+                <p className="result-kicker">04 · Generated score</p>
+                <h2>Performance note</h2>
+                <p>Read the detected sequence as strings or Western note names, then select any cell to revisit its moment.</p>
               </div>
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <div className="note-controls">
                 <div className="log-view-toggle">
                   <button
                     type="button"
@@ -984,7 +1013,7 @@ export default function App() {
                     onClick={() => setNoteFormat('number')}
                     title="Show string numbers (1–16)"
                   >
-                    S#
+                    Strings
                   </button>
                   <button
                     type="button"
@@ -992,24 +1021,35 @@ export default function App() {
                     onClick={() => setNoteFormat('note')}
                     title="Show Western note names (G5–G2)"
                   >
-                    Note
+                    Notes
                   </button>
                 </div>
                 {noteRows.length > 0 && (
                   <button type="button" className="btn secondary btn-sm" onClick={handleDownloadNotePdf}>
-                    Download as PDF
+                    Export PDF
                   </button>
                 )}
               </div>
             </div>
-            <p className="generated-note-desc">
-              {noteFormat === 'note'
-                ? 'Each box is one sound event shown as Western note name. Strings plucked together = notes with underline.'
-                : 'Each box is one sound event. Single string = number only; strings plucked together = numbers with underline.'}
-            </p>
             {noteRows.length > 0 ? (
-              <div className="generated-note-grid-wrap" ref={generatedNoteRef}>
-                <div className="generated-note-grid" style={{ gridTemplateColumns: `repeat(${NOTE_COLUMNS}, 1fr)` }}>
+              <div className="note-sheet" ref={generatedNoteRef}>
+                <div className="note-sheet-header">
+                  <div>
+                    <span>Nat Shin Naung · Saung analysis</span>
+                    <strong>{method === 'both' ? 'Audio + hand score' : method === 'audio' ? 'Audio detection score' : 'Hand tracking score'}</strong>
+                  </div>
+                  <div className="note-sheet-meta">
+                    <span>{gridRows.length} moments</span>
+                    <span>{formatTime(lastEventTime)} duration</span>
+                  </div>
+                </div>
+                <div className="note-sheet-guide">
+                  <span>{noteFormat === 'note' ? 'Western note names' : 'Saung string numbers'}</span>
+                  <span><i aria-hidden="true">•</i> thumb contact</span>
+                  <span><u>joined</u> simultaneous strings</span>
+                </div>
+                <div className="generated-note-grid-wrap">
+                  <div className="generated-note-grid" style={{ gridTemplateColumns: `repeat(${NOTE_COLUMNS}, 1fr)` }}>
                   {noteRows.map((row, ri) =>
                     row.map((cell, ci) => {
                       const flatIndex = ri * NOTE_COLUMNS + ci
@@ -1031,6 +1071,10 @@ export default function App() {
                           }}
                           title={hasParts && eventTime != null ? `Seek to ${formatTime(eventTime)}` : ''}
                         >
+                          <span className="generated-note-cell-meta">
+                            <small>{String(flatIndex + 1).padStart(2, '0')}</small>
+                            <small>{eventTime != null ? formatTime(eventTime) : ''}</small>
+                          </span>
                           {hasParts && (
                             <span className={cell.together ? 'generated-note-together' : ''}>
                               {cell.parts.map((p, idx) => (
@@ -1053,7 +1097,9 @@ export default function App() {
                       )
                     })
                   )}
+                  </div>
                 </div>
+                <p className="note-sheet-caption">Generated from detection events for review. Signal agreement is diagnostic and is not a ground-truth accuracy measure.</p>
               </div>
             ) : (
               <p className="muted">No events to show.</p>
@@ -1062,8 +1108,14 @@ export default function App() {
         )}
 
         {status?.status === 'done' && logs.length > 0 && hasBothAudioHand && (
-          <section className="card analysis-card">
-            <h3>Analysis</h3>
+          <section className="card analysis-card result-section-card">
+            <div className="result-section-heading">
+              <div>
+                <p className="result-kicker">05 · Signal comparison</p>
+                <h2>Agreement details</h2>
+                <p>Inspect where audio and hand labels reinforce one another or need review.</p>
+              </div>
+            </div>
             <div className="analysis-section">
               <h4 className="analysis-subtitle">Per-string match rate</h4>
               <div className="per-string-table-wrap">
@@ -1136,7 +1188,7 @@ export default function App() {
       </main>
 
       <footer className="footer">
-        <p>NAT SHIN NAUNG · Audio · Hand · Both · For teaching / presentation</p>
+        <p>NAT SHIN NAUNG · Audio · Hand · Evidence · Research prototype</p>
       </footer>
     </div>
   )
